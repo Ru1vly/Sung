@@ -5334,6 +5334,20 @@ void runMaterialSizingTests(Backend *b, QQuickWindow *w) {
     const auto calm = support->property("color").value<QColor>();
     c.check(!path->property("errored").toBool() && calm == c.themeColor("muted"),
             "which is quiet while nothing is wrong");
+    // Compose places the line outside the 56dp container, 4dp below it, and
+    // counts it in the field's height (TextFieldImpl.kt SupportingTopPadding;
+    // OutlinedTextFieldTokens.ContainerHeight, SupportingFont BodySmall).
+    auto container = path->property("background").value<QQuickItem *>();
+    const auto boxRect = container ? container->mapRectToScene(container->boundingRect()) : QRectF();
+    // The item's own top, not boundingRect(): a Text's bounding rectangle is
+    // its laid-out glyphs, which a fixed line height shifts off the item.
+    const auto lineRect = QRectF(support->mapToScene(QPointF(0, 0)), QSizeF(support->width(), support->height()));
+    c.check(container && qAbs(boxRect.height() - 56) < 0.5, "the field's container stays 56dp tall");
+    c.check(container && qAbs(lineRect.top() - boxRect.bottom() - 4) < 0.5,
+            "its supporting line sits 4dp below the container, outside it");
+    c.check(qAbs(path->height() - (56 + support->implicitHeight() + 4)) < 0.5,
+            "and the field makes room for the line");
+    c.check(support->property("font").value<QFont>().pixelSize() == 12, "in BodySmall");
     c.shot("04-field-supporting");
     path->setProperty("text", QString("/definitely/not/here"));
     QTest::qWait(150);

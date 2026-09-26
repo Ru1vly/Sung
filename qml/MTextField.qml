@@ -35,12 +35,17 @@ TextField {
                                   : errored ? Theme.error : activeFocus ? Theme.primary : Theme.outline
     readonly property bool floatingLabel: activeFocus || length > 0 || preeditText.length > 0
     readonly property bool handlesTextInput: true
-    implicitHeight: 56
+    // Compose measures the supporting line as part of the field but places it
+    // outside the container (TextFieldImpl.kt, InsideTextFieldLayout), so the
+    // container keeps its 56dp (OutlinedTextFieldTokens.ContainerHeight) and
+    // the field grows by the line and the 4dp above it (SupportingTopPadding).
+    readonly property real supportSpace: supportLine.visible ? supportLine.implicitHeight + 4 : 0
+    implicitHeight: 56 + supportSpace
     leftPadding: 16; rightPadding: 16
     // A filled field floats its label inside the container, so the text it
     // labels sits below it rather than in the middle.
     topPadding: field.filled && field.label.length ? 24 : 16
-    bottomPadding: field.filled && field.label.length ? 8 : 16
+    bottomPadding: (field.filled && field.label.length ? 8 : 16) + supportSpace
     selectByMouse: true
     verticalAlignment: TextInput.AlignVCenter
     font.family: Theme.fontFamily; font.pixelSize: Theme.bodyLarge
@@ -50,7 +55,7 @@ TextField {
     cursorDelegate: MCaret {}
     // Material reserves the supporting line so a field does not jump when an
     // error arrives.
-    bottomInset: supportLine.visible ? -supportLine.height-4 : 0
+    bottomInset: supportSpace
     // Qt 6.11 hides Accessible.name for a password edit, while keeping its
     // passwordEdit state. QQuickAccessibleAttached's labelledBy relation
     // (qquickaccessibleattached_p.h:61, 90-95, 146-163) gives assistive
@@ -89,7 +94,7 @@ TextField {
     SungText {
         id: fieldLabel; objectName: "fieldLabel"
         x: field.leftPadding
-        y: field.floatingLabel ? (field.filled ? 8 : -height/2) : (field.height-height)/2
+        y: field.floatingLabel ? (field.filled ? 8 : -height/2) : (field.height-field.supportSpace-height)/2
         text: field.label; visible: text.length > 0
         font.pixelSize: field.floatingLabel ? Theme.labelMedium : Theme.bodyLarge
         color: field.dimmed ? field.onSurface(Theme.disabledContentOpacity)
@@ -107,11 +112,13 @@ TextField {
         id: supportLine
         objectName: "fieldSupport"
         visible: text.length > 0
-        x: field.leftPadding; y: field.height + 4
+        // 16dp in from each side (TextFieldPadding), in BodySmall and
+        // onSurfaceVariant (OutlinedTextFieldTokens.SupportingFont, SupportingColor).
+        x: field.leftPadding; y: field.height - field.supportSpace + 4
         width: field.width - field.leftPadding - field.rightPadding
         text: field.errored ? field.errorText : field.supporting
         color: field.errored ? Theme.error : Theme.muted
-        font.pixelSize: Theme.labelMedium
+        font.pixelSize: Theme.bodySmall
         wrapMode: Text.Wrap
         Accessible.ignored: true
     }
