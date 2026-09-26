@@ -620,9 +620,8 @@ void Cider::play(const QVariantMap &track, qint64 from) {
   m_starting = true;
   m_wanted = true;
   m_misses = 0;
-  m_pollBusy = false;
   m_waited.restart();
-  cancel("poll");
+  commanded();
   holdAutoplay();
   if (m_volume >= 0)
     m_volumeSend.start();
@@ -641,19 +640,49 @@ void Cider::play(const QVariantMap &track, qint64 from) {
            abandon(e);
            return;
          }
-         m_poll.start();
+         schedule();
          QTimer::singleShot(300, this, &Cider::poll);
        },
        "transport");
   emit transportChanged();
 }
 
+// Every command Sung sends starts a new reading of Cider: an answer to a
+// question asked before it describes a state that no longer holds.
+void Cider::commanded() {
+  ++m_serial;
+  m_commanded.restart();
+  cancel("poll");
+  m_pollBusy = false;
+}
+
+// Once a second while Cider plays for Sung. Paused, every two seconds while
+// Sung is on screen, so a song started or stopped from Cider's own window or
+// media keys shows here too, and not at all while Sung is hidden.
+void Cider::schedule() {
+  const bool live = active() && (m_wanted || m_starting);
+  if (!active() || (!live && !m_attentive)) {
+    m_poll.stop();
+    return;
+  }
+  const int interval = live ? 1000 : 2000;
+  if (!m_poll.isActive() || m_poll.interval() != interval)
+    m_poll.start(interval);
+}
+
+void Cider::setAttentive(bool attentive) {
+  if (m_attentive == attentive)
+    return;
+  m_attentive = attentive;
+  schedule();
+}
+
 void Cider::poll() {
-  if (!active() || !m_wanted || m_pollBusy)
+  if (!active() || m_pollBusy)
     return;
   m_pollBusy = true;
   const auto song = m_song;
-  const auto generation = m_generation;
+  const auto serial = m_serial;
   auto missed = [this](const QString &e) {
     m_pollBusy = false;
     if (++m_misses < 3)
@@ -663,8 +692,8 @@ void Cider::poll() {
   };
   send(
       "GET", "/api/v1/playback/now-playing", {},
-      [this, song, generation, missed](const QVariantMap &d, const QString &e) {
-        if (song != m_song || generation != m_generation) {
+      [this, song, serial, missed](const QVariantMap &d, const QString &e) {
+        if (song != m_song || serial != m_serial) {
           m_pollBusy = false;
           return;
         }
@@ -676,8 +705,8 @@ void Cider::poll() {
         }
         const auto info = e.isEmpty() ? d.value("info").toMap() : QVariantMap{};
         send("GET", "/api/v1/playback/is-playing", {},
-             [this, song, info, missed](const QVariantMap &p, const QString &e) {
-               if (song != m_song) {
+             [this, song, serial, info, missed](const QVariantMap &p, const QString &e) {
+               if (song != m_song || serial != m_serial) {
                  m_pollBusy = false;
                  return;
                }
@@ -696,7 +725,7 @@ void Cider::poll() {
 
 void Cider::settle() {
   m_starting = m_playing = m_wanted = false;
-  m_poll.stop();
+  schedule();
   emit transportChanged();
 }
 // Lets go without pausing: Cider is either unreachable or doing something
@@ -719,6 +748,11 @@ void Cider::observe(const QVariantMap &info, bool playing) {
   const bool ours = !info.isEmpty() && matches(info);
   const auto at = qint64(info.value("currentPlaybackTime").toDouble() * 1000);
   const auto total = info.value("durationInMillis").toLongLong();
+  // Apple's player takes a moment to start, pause or seek, and says so only
+  // once it has. For that long after a command, a reading that disagrees
+  // with it is the command still taking hold, not the listener changing
+  // their mind; after it, Cider's word is final.
+  const bool settling = m_commanded.isValid() && m_commanded.elapsed() < 3000;
   if (m_starting) {
     if (ours && playing) {
       m_starting = false;
@@ -746,7 +780,7 @@ void Cider::observe(const QVariantMap &info, bool playing) {
       m_base = m_duration;
       settle();
       emit finished();
-    } else {
+    } else if (!settling) {
       // Someone chose another song in Cider itself. Sung stops following
       // rather than fighting over it.
       m_base = last;
@@ -757,10 +791,14 @@ void Cider::observe(const QVariantMap &info, bool playing) {
   if (total > 0)
     m_duration = total;
   if (playing) {
+    if (!m_wanted && settling)
+      return;
     m_base = at;
     m_clock.restart();
-    if (!m_playing) {
-      m_playing = true;
+    // Playing without Sung having asked: started from Cider itself.
+    if (!m_playing || !m_wanted) {
+      m_playing = m_wanted = true;
+      schedule();
       emit transportChanged();
     }
     emit progressed();
@@ -776,9 +814,15 @@ void Cider::observe(const QVariantMap &info, bool playing) {
     emit finished();
     return;
   }
-  // Paused from Cider's own window or its media keys.
+  if (m_wanted && settling)
+    return;
+  // Paused, whether by Sung or from Cider's own window or media keys.
+  const bool changed = m_playing || m_wanted;
   m_base = at;
-  settle();
+  m_playing = m_wanted = false;
+  schedule();
+  if (changed)
+    emit transportChanged();
 }
 
 void Cider::pause() {
@@ -787,9 +831,8 @@ void Cider::pause() {
     return;
   m_base = position();
   m_playing = m_starting = false;
-  m_poll.stop();
-  cancel("poll");
-  m_pollBusy = false;
+  commanded();
+  schedule();
   send("POST", "/api/v1/playback/pause", {}, {});
   emit transportChanged();
 }
@@ -800,8 +843,9 @@ void Cider::resume() {
   m_wanted = true;
   m_playing = true;
   m_clock.restart();
+  commanded();
+  schedule();
   send("POST", "/api/v1/playback/play", {}, {});
-  m_poll.start();
   emit transportChanged();
 }
 
@@ -814,6 +858,7 @@ void Cider::seek(qint64 milliseconds) {
   m_clock.restart();
   if (m_starting)
     m_startAt = target;
+  commanded();
   send("POST", "/api/v1/playback/seek", {{"position", double(target) / 1000.0}}, {});
   emit transportChanged();
 }

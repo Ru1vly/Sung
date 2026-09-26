@@ -121,15 +121,7 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     if(buffer.isValid() && (m_decodeRate!=buffer.format().sampleRate() || m_decodeChannels!=buffer.format().channelCount())){m_decodeRate=buffer.format().sampleRate();m_decodeChannels=buffer.format().channelCount();emit qualityChanged();}
     // Levelling measures every recording, including while the meters are idle.
     if(buffer.isValid() && playing())m_loudness.process(buffer);
-    if(!m_uiActive || !motion() || !playing())return;
-    if(!buffer.isValid()){resetAudioLevels();return;}
-    m_levelAnalyzer.process(buffer);
-    if(m_spectrumActive)m_spectrum.process(buffer);
-    m_levelIdle.start(qBound(180,int(buffer.duration()/1000/std::max(0.25,playbackRate()))+100,600));
-    if(m_levelPublish.isValid() && m_levelPublish.elapsed()<33)return;
-    m_levelPublish.restart();const auto levels=m_levelAnalyzer.takeLevels();
-    if(levels!=m_audioLevels){m_audioLevels=levels;emit audioLevelsChanged();}
-    if(m_spectrumActive){const auto bands=m_spectrum.take();if(bands!=m_audioSpectrum){m_audioSpectrum=bands;emit audioSpectrumChanged();}}
+    meter(buffer);
   });
   eachDeck([this](QMediaPlayer *deck){connect(deck,&QMediaPlayer::sourceChanged,this,[this,deck]{if(isActive(*deck))resetAudioLevels();});});
   connect(this,&Backend::trackChanged,this,&Backend::refreshRecentlyPlayed);
@@ -1374,6 +1366,8 @@ void Backend::clearCache() {
 void Backend::setUiActive(bool active) {
   if(m_uiActive==active)return;
   m_uiActive=active;
+  m_server.cider()->setAttentive(active);
+  updateOutputTap();
   if(active){
     emit positionChanged();
     if(playing())m_positionTick.start();
@@ -2885,16 +2879,22 @@ void Backend::leaveRemote() {
   if(!m_remote)return;
   m_remote=false;
   m_server.cider()->release();
+  updateOutputTap();
 }
 void Backend::wireCider() {
   auto *cider=m_server.cider();
+  cider->setAttentive(m_uiActive);
+  connect(&m_outputTap,&OutputTap::buffer,this,[this](const QAudioBuffer &buffer){if(m_remote)meter(buffer);});
+  connect(this,&Backend::settingsChanged,this,&Backend::updateOutputTap);
   // Cider's state stands in for the deck's: the same bookkeeping runs when
   // it starts, pauses or moves on.
   connect(cider,&Cider::transportChanged,this,[this]{
+    updateOutputTap();
     if(!m_remote)return;
     const auto *cider=m_server.cider();
     if(cider->playing()){
-      m_stopped=false;m_resolving=false;
+      // Started from Cider itself counts as wanting it to play.
+      m_wantPlay=true;m_stopped=false;m_resolving=false;
       if(m_uiActive)m_positionTick.start();
       recordHistory();notifyTrack();
     } else if(!cider->starting()){
@@ -2915,4 +2915,24 @@ void Backend::wireCider() {
     m_wantPlay=false;m_resolving=false;m_positionTick.stop();
     notifyError(message,"play");emit playbackChanged();
   });
+}
+
+// The meters and the visualizer, from whichever sound is being heard: a
+// deck's decoded audio, or what the speakers play while Cider has the song.
+void Backend::meter(const QAudioBuffer &buffer) {
+  if(!m_uiActive || !motion() || !playing())return;
+  if(!buffer.isValid()){resetAudioLevels();return;}
+  m_levelAnalyzer.process(buffer);
+  if(m_spectrumActive)m_spectrum.process(buffer);
+  const double rate=m_remote?1.0:std::max(0.25,playbackRate());
+  m_levelIdle.start(qBound(180,int(buffer.duration()/1000/rate)+100,600));
+  if(m_levelPublish.isValid() && m_levelPublish.elapsed()<33)return;
+  m_levelPublish.restart();const auto levels=m_levelAnalyzer.takeLevels();
+  if(levels!=m_audioLevels){m_audioLevels=levels;emit audioLevelsChanged();}
+  if(m_spectrumActive){const auto bands=m_spectrum.take();if(bands!=m_audioSpectrum){m_audioSpectrum=bands;emit audioSpectrumChanged();}}
+}
+// Listens to the speakers only while a Cider song plays and something on
+// screen reads the result, the same condition the deck's tap measures under.
+void Backend::updateOutputTap() {
+  m_outputTap.setRunning(m_remote && m_uiActive && motion() && m_server.cider()->playing());
 }

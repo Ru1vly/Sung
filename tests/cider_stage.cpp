@@ -100,7 +100,11 @@ void runCiderTests(Backend *b, QQuickWindow *w) {
   auto *fixture = new QProcess(qApp);
   const auto log = c.directory + "/cider-requests.jsonl";
   QFile::remove(log);
-  fixture->start("python3", {qEnvironmentVariable("SUNG_CIDER_FIXTURE"), "--token", "stage-token", "--log", log});
+  QStringList fixtureArguments{qEnvironmentVariable("SUNG_CIDER_FIXTURE"), "--token", "stage-token", "--log", log};
+  // Heard on the real default output through paplay, for a run against a
+  // real sound server and parec. Off by default: nobody wants a test tone.
+  if (qEnvironmentVariableIsSet("SUNG_CIDER_AUDIBLE")) fixtureArguments << "--audible";
+  fixture->start("python3", fixtureArguments);
   c.check(fixture->waitForReadyRead(10000), "the stand-in Cider starts");
   const auto line = QString::fromUtf8(fixture->readLine()).trimmed();
   if (!line.startsWith("PORT ")) { c.check(false, "the stand-in Cider reports its port"); finish(fixture); return; }
@@ -236,11 +240,45 @@ void runCiderTests(Backend *b, QQuickWindow *w) {
   const int paused = readings();
   const double pausedCpu = cpu();
   span.restart();
-  QTest::qWait(3000);
-  fprintf(stdout, "MEASURE paused, same view: %.1f%% of a core\n", (cpu() - pausedCpu) / (span.elapsed() / 1000.0) * 100);
-  c.check(readings() == paused, "and not read at all while paused");
+  QTest::qWait(4200);
+  const double pausedSeconds = span.elapsed() / 1000.0;
+  fprintf(stdout, "MEASURE paused, same view: %.2f readings/s, %.1f%% of a core\n",
+          (readings() - paused) / pausedSeconds, (cpu() - pausedCpu) / pausedSeconds * 100);
+  // On screen and paused, every two seconds, so a play pressed in Cider shows.
+  c.check(readings() - paused >= 1 && readings() - paused <= 3, "read every two seconds while paused on screen");
   c.click("playButton");
   c.check(c.until([&] { return b->playing(); }), "playing once more");
+
+  // Apple's player acts a moment after it is asked. The button shows what
+  // was pressed, not what Cider said a moment earlier.
+  auto *playButton = shown(w->contentItem(), "playButton");
+  const auto symbol = [&] { return playButton ? playButton->property("symbol").toString() : QString(); };
+  const auto holds = [&](const QString &expected, int milliseconds) {
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < milliseconds) {
+      if (symbol() != expected) return false;
+      QTest::qWait(100);
+    }
+    return true;
+  };
+  QTest::qWait(3200);
+  QNetworkRequest lagRequest(QUrl(address + "/fixture/lag"));
+  lagRequest.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+  auto *lag = network.post(lagRequest, QByteArray("{\"seconds\": 1.5}"));
+  QSignalSpy lagged(lag, &QNetworkReply::finished);
+  lagged.wait(5000);
+  lag->deleteLater();
+  c.click("playButton");
+  c.check(holds("play", 2600), "a pause stays shown while Cider takes its time");
+  c.check(c.until([&] { return !fixtureState().value("playing").toBool(); }), "and Cider pauses");
+  c.click("playButton");
+  c.check(holds("pause", 2600), "a play stays shown while Cider takes its time");
+  c.check(c.until([&] { return fixtureState().value("playing").toBool(); }), "and Cider plays");
+  auto *noLag = network.post(lagRequest, QByteArray("{\"seconds\": 0}"));
+  QSignalSpy unlagged(noLag, &QNetworkReply::finished);
+  unlagged.wait(5000);
+  noLag->deleteLater();
   // Minimised, nothing is drawn, so what is left is the following itself.
   w->showMinimized();
   QTest::qWait(1500);
@@ -252,6 +290,15 @@ void runCiderTests(Backend *b, QQuickWindow *w) {
   fprintf(stdout, "MEASURE following Cider minimised: %.2f readings/s, %.1f%% of a core\n",
           (readings() - hiddenBefore) / hiddenSeconds, (cpu() - hiddenCpu) / hiddenSeconds * 100);
   c.check(readings() > hiddenBefore, "Cider is still followed while the window is minimised");
+  // Minimised and paused, Cider is left alone; the button cannot be reached,
+  // so the pause is the media key's.
+  b->pause();
+  QTest::qWait(600);
+  const int hiddenPaused = readings();
+  QTest::qWait(4500);
+  c.check(readings() == hiddenPaused, "and not read at all once paused there");
+  b->play();
+  c.check(c.until([&] { return b->playing(); }), "playing after the minimised pause");
   w->showNormal();
   QWindowSystemInterface::handleFocusWindowChanged(w);
   QTest::qWait(800);
@@ -283,7 +330,24 @@ void runCiderTests(Backend *b, QQuickWindow *w) {
   auto *speed = shown(w->contentItem(), "immersiveSpeed");
   c.check(speed && !speed->isEnabled(), "playback speed is off while Cider plays");
   c.shot("10-immersive-menu");
-  QTest::keyClick(w, Qt::Key_Escape);
+  // The visualizer hears what the speakers play, since Cider has the sound.
+  c.click("immersiveLayout_visualizer");
+  const auto loud = [&](const char *property) {
+    for (const auto &v : b->property(property).toList()) if (v.toDouble() > 0.05) return true;
+    return false;
+  };
+  c.check(c.until([&] { return loud("audioSpectrum"); }), "the visualizer moves with an Apple Music song");
+  c.check(loud("audioLevels"), "and so do the levels the play button and backdrop read");
+  QTest::qWait(600);
+  c.shot("10b-visualizer");
+  c.click("immersivePlayButton");
+  c.check(c.until([&] { return !loud("audioLevels") && !loud("audioSpectrum"); }), "paused, the visualizer rests");
+  c.click("immersivePlayButton");
+  c.check(c.until([&] { return b->playing() && loud("audioSpectrum"); }), "and moves again on play");
+  // The layout is kept, so the next captures start from the one they expect.
+  c.click("immersiveLayoutButton");
+  QTest::qWait(450);
+  c.click("immersiveLayout_split");
   QTest::qWait(400);
   w->setProperty("immersive", false);
   QTest::qWait(600);

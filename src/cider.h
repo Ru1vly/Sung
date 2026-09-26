@@ -72,6 +72,8 @@ public:
   // Run as the application quits: lets go, and waits up to 800 ms for Cider
   // to hear it, since nothing is sent once the event loop has stopped.
   void shutDown();
+  // Whether Sung is on screen: Cider is then also watched while paused.
+  void setAttentive(bool attentive);
   bool active() const { return !m_song.isEmpty(); }
   bool playing() const { return m_playing; }
   bool starting() const { return m_starting; }
@@ -99,6 +101,8 @@ private:
   void poll();
   void observe(const QVariantMap &info, bool playing);
   void settle();
+  void commanded();
+  void schedule();
   void abandon(const QString &message);
   void holdAutoplay();
   void restoreAutoplay();
@@ -114,7 +118,9 @@ private:
   QHash<QString, QPointer<QNetworkReply>> m_channels;
 
   QTimer m_poll, m_volumeSend;
-  QElapsedTimer m_clock, m_waited;
+  QElapsedTimer m_clock, m_waited, m_commanded;
+  quint64 m_serial = 0;
+  bool m_attentive = true;
   QString m_song, m_catalogId, m_title;
   bool m_playing = false, m_starting = false, m_wanted = false,
        m_pollBusy = false;

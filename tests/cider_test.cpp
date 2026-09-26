@@ -10,6 +10,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <functional>
 
 class CiderTest : public QObject {
   Q_OBJECT
@@ -212,6 +213,73 @@ private slots:
     QTRY_COMPARE_WITH_TIMEOUT(state().value("song").toString(), QString("i.aaa2"), 8000);
     QTRY_VERIFY_WITH_TIMEOUT(b->playing(), 8000);
     QVERIFY(count("/api/v1/playback/play-item") >= 2);
+  }
+
+  void control(const QString &path, const QJsonObject &body = {}) {
+    QNetworkRequest r(QUrl(address + path));
+    r.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    auto *reply = network.post(r, QJsonDocument(body).toJson());
+    QSignalSpy done(reply, &QNetworkReply::finished);
+    done.wait(5000);
+    reply->deleteLater();
+  }
+  // Holds for the whole stretch, sampled every 100 ms.
+  bool throughout(const std::function<bool()> &predicate, int milliseconds) {
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < milliseconds) {
+      if (!predicate())
+        return false;
+      QTest::qWait(100);
+    }
+    return true;
+  }
+
+  // Apple's player takes a moment to act, and reports the old state until it
+  // has. The button must show what was asked, not flick back to what Cider
+  // said a moment before.
+  void readsThroughCidersDelay() {
+    b->playItem(browse({{"mode", "album"}, {"remoteId", "l.album1"}}).value("items").toList()[1].toMap());
+    QTRY_VERIFY_WITH_TIMEOUT(b->playing(), 8000);
+    control("/fixture/lag", {{"seconds", 1.5}});
+    b->pause();
+    QVERIFY(!b->playing());
+    QVERIFY(throughout([&] { return !b->playing(); }, 2600));
+    QTRY_VERIFY_WITH_TIMEOUT(!state().value("playing").toBool(), 3000);
+    b->play();
+    QVERIFY(b->playing());
+    QVERIFY(throughout([&] { return b->playing(); }, 2600));
+    QTRY_VERIFY_WITH_TIMEOUT(state().value("playing").toBool(), 3000);
+    // Pressed quickly several times, it ends where the last press left it,
+    // on both sides.
+    b->pause(); QTest::qWait(150); b->play(); QTest::qWait(150); b->pause();
+    QVERIFY(throughout([&] { return !b->playing(); }, 2600));
+    QTRY_VERIFY_WITH_TIMEOUT(!state().value("playing").toBool(), 4000);
+    QVERIFY(throughout([&] { return !b->playing() && !state().value("playing").toBool(); }, 2500));
+    control("/fixture/lag", {{"seconds", 0}});
+    b->play();
+    QTRY_VERIFY_WITH_TIMEOUT(state().value("playing").toBool(), 3000);
+  }
+
+  // Play and pause pressed in Cider's own window, or its media keys, show in
+  // Sung while Sung is on screen.
+  void followsPlayAndPausePressedInCider() {
+    QTRY_VERIFY_WITH_TIMEOUT(b->playing(), 5000);
+    QTest::qWait(3200);
+    control("/fixture/pause");
+    QTRY_VERIFY_WITH_TIMEOUT(!b->playing(), 3000);
+    control("/fixture/resume");
+    QTRY_VERIFY_WITH_TIMEOUT(b->playing(), 4000);
+    // Hidden and paused, Cider is left alone.
+    b->pause();
+    b->setUiActive(false);
+    QTest::qWait(400);
+    const auto before = count("/api/v1/playback/now-playing");
+    QTest::qWait(4500);
+    QCOMPARE(count("/api/v1/playback/now-playing"), before);
+    b->setUiActive(true);
+    b->play();
+    QTRY_VERIFY_WITH_TIMEOUT(b->playing() && state().value("playing").toBool(), 5000);
   }
 
   void songsOnlyInTheLibraryPlayByAddress() {

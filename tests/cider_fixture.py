@@ -8,12 +8,22 @@ response shapes Cider 2 sends: now-playing wraps the Apple Music attributes in
 answer in "data". Playback runs on a real clock, so a song ends when its time
 is up, and Cider's autoplay starts a song of its own unless it is turned off.
 
-Usage: cider_fixture.py [--port N] [--token T] [--log FILE]
+Apple's player also takes a moment to act on a command. POST /fixture/lag
+{"seconds": n} makes play, pause and seek land that late, with the old state
+reported meanwhile, which is what Sung has to read through. POST
+/fixture/pause and /fixture/resume act as Cider's own window would. With
+--audible, a playing song sounds on the default output through paplay, so
+the speaker-output tap has something to hear.
+
+Usage: cider_fixture.py [--port N] [--token T] [--log FILE] [--audible]
 Prints "PORT <n>" once listening. Every request is appended to the log as a
 JSON line, token included, so a test can check what Sung sent.
 """
 import argparse
 import json
+import math
+import struct
+import subprocess
 import sys
 import threading
 import time
@@ -75,7 +85,10 @@ class Deck:
     """Cider's player: one song, a clock, and the autoplay setting."""
 
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.lag = 0.0
+        self.audible = False
+        self.sound = None
         self.song = None
         self.playing = False
         self.offset = 0.0
@@ -95,6 +108,7 @@ class Deck:
                 return self.elapsed()
             self.playing = False
             self.offset = total
+            self.voice()
             return total
         return min(at, total)
 
@@ -108,6 +122,56 @@ class Deck:
         self.elapsed()
         self.offset = max(0.0, seconds)
         self.started = time.monotonic()
+
+    def later(self, action):
+        """Runs a command now, or after the lag the way Apple's player does."""
+        if self.lag <= 0:
+            action()
+            self.voice()
+            return
+        def apply():
+            with self.lock:
+                action()
+                self.voice()
+        threading.Timer(self.lag, apply).start()
+
+    def resume(self):
+        at = self.elapsed()
+        if self.song and not self.playing:
+            self.offset, self.started, self.playing = at, time.monotonic(), True
+
+    def pause(self):
+        self.offset, self.playing = self.elapsed(), False
+
+    def voice(self):
+        """Sounds while playing, through paplay to the default output."""
+        if not self.audible:
+            return
+        if self.playing and not self.sound:
+            self.sound = subprocess.Popen(["paplay", "--raw", "--format=float32le", "--rate=48000",
+                                           "--channels=2", "--client-name=Cider"], stdin=subprocess.PIPE)
+            threading.Thread(target=tone, args=(self.sound,), daemon=True).start()
+        elif not self.playing and self.sound:
+            self.sound.kill()
+            self.sound = None
+
+
+def tone(process):
+    """A bass note and a high one beating against each other, forever."""
+    frame = 0
+    while process.poll() is None:
+        chunk = bytearray()
+        for i in range(4800):
+            t = (frame + i) / 48000
+            v = 0.3 * math.sin(2 * math.pi * 110 * t) * (0.6 + 0.4 * math.sin(2 * math.pi * 2 * t)) \
+                + 0.15 * math.sin(2 * math.pi * 2500 * t)
+            chunk += struct.pack("<ff", v, v)
+        frame += 4800
+        try:
+            process.stdin.write(chunk)
+            process.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            return
 
 
 deck = Deck()
@@ -209,6 +273,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/fixture/external":
             with deck.lock:
                 deck.load(CHART[0], True)
+                deck.voice()
+            return self.answer(200, {"status": "ok"})
+        if path == "/fixture/lag":
+            with deck.lock:
+                deck.lag = float(body.get("seconds", 0))
+            return self.answer(200, {"status": "ok"})
+        if path in ("/fixture/pause", "/fixture/resume"):
+            with deck.lock:
+                deck.pause() if path.endswith("pause") else deck.resume()
+                deck.voice()
             return self.answer(200, {"status": "ok"})
         if path == "/fixture/state":
             with deck.lock:
@@ -239,23 +313,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self.answer(200, {"status": "ok", "volume": deck.volume})
             if method == "POST":
                 if path == p + "play-item" and body.get("type") == "songs" and body.get("id") in SONGS:
-                    deck.load(SONGS[body["id"]])
+                    item = SONGS[body["id"]]
+                    deck.later(lambda: deck.load(item))
                     return self.answer(200, {"status": "ok"})
                 if path == p + "play-item-href":
                     item = SONGS.get(str(body.get("href", "")).rsplit("/", 1)[-1])
                     if not item:
                         return self.answer(404, {"error": "Not found"})
-                    deck.load(item)
+                    deck.later(lambda: deck.load(item))
                     return self.answer(200, {"status": "ok"})
                 if path == p + "play":
-                    if deck.song and not deck.playing:
-                        deck.offset, deck.started, deck.playing = at, time.monotonic(), True
+                    deck.later(deck.resume)
                     return self.answer(200, {"status": "ok"})
                 if path == p + "pause":
-                    deck.offset, deck.playing = at, False
+                    deck.later(deck.pause)
                     return self.answer(200, {"status": "ok"})
                 if path == p + "seek":
-                    deck.seek(float(body.get("position", 0)))
+                    target = float(body.get("position", 0))
+                    deck.later(lambda: deck.seek(target))
                     return self.answer(204)
                 if path == p + "volume":
                     deck.volume = float(body.get("volume", deck.volume))
@@ -282,7 +357,9 @@ def main():
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--token", default="")
     parser.add_argument("--log")
+    parser.add_argument("--audible", action="store_true")
     args = parser.parse_args()
+    deck.audible = args.audible
     Handler.token = args.token
     Handler.log = args.log
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

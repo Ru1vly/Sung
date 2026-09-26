@@ -3,6 +3,7 @@
 #include <QAudioOutput>
 #include <QAudioBufferOutput>
 #include "audiolevels.h"
+#include "outputtap.h"
 #include <QMediaPlayer>
 #include <QProcess>
 #include <QSettings>
@@ -858,6 +859,7 @@ private:
   bool m_usingB = false;
   // The current song plays in Cider; see Cider.
   bool m_remote = false;
+  OutputTap m_outputTap;
   QMediaPlayer &m_media() { return m_usingB ? m_deckB : m_deckA; }
   const QMediaPlayer &m_media() const { return m_usingB ? m_deckB : m_deckA; }
   QMediaPlayer &spareDeck() { return m_usingB ? m_deckA : m_deckB; }
@@ -889,6 +891,8 @@ private:
   // Hands playback back from Cider to Sung's own decks.
   void leaveRemote();
   void wireCider();
+  void meter(const QAudioBuffer &buffer);
+  void updateOutputTap();
   // The queue position the spare deck is holding, or -1 when it holds nothing.
   int m_handoffIndex = -1;
   bool m_handoffPrepared = false;
