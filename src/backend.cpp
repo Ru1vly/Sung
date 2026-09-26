@@ -159,23 +159,8 @@ Backend::Backend(QObject *parent) : QObject(parent) {
                 emit playbackChanged();
               }
             }
-            if (s == QMediaPlayer::EndOfMedia) {
-              // A finished recording has nothing left to return to.
-              clearResumePosition(current().value("id").toString());
-              if(m_sleepAtEnd){endCrossfade(false);clearSpare();setSleep(0);pause();emit toast("Sleep timer ended");return;}
-              // Stop instead of advancing, autoplaying or wrapping around.
-              if(m_sleepAtQueueEnd&&!shuffle()&&repeat()==0&&m_index+1>=m_queue.count()){
-                endCrossfade(false);clearSpare();setSleep(0);pause();emit toast("Sleep timer ended");return;}
-              // An overlap runs right up to this moment. The song that was
-              // leaving has now left, so the fade is simply over.
-              if(m_crossfading){endCrossfade(true);return;}
-              if (repeat() == 2) {
-                m_serverListenToken=0;
-                m_media().setPosition(0);
-                m_media().play();
-              } else if (!finishGapless())
-                next();
-            }
+            if (s == QMediaPlayer::EndOfMedia)
+              trackEnded();
           });});
   eachDeck([this](QMediaPlayer *deck){connect(deck,&QMediaPlayer::errorOccurred,this,
           [this,deck](QMediaPlayer::Error err, const QString &) {
@@ -214,6 +199,7 @@ Backend::Backend(QObject *parent) : QObject(parent) {
   connect(this,&Backend::catalogChanged,this,&Backend::presentationChanged);
   load();
   setupServer();
+  wireCider();
   setupFolderWatching();
 }
 Backend::~Backend() {
@@ -653,6 +639,19 @@ void Backend::recoverStream() {
   QTimer::singleShot(0,this,[this,token]{if(m_wantPlay && token==m_trackToken){m_media().stop();m_media().setSource({});resolveCurrent(true);}});
 }
 void Backend::resolveCurrent(bool retry) {
+  if(current().value("source")=="cider"){
+    cancelPreparation();cancel("play");m_audioCache.reset();m_recovering=false;
+    if(!m_server.cider()->owns(current())){
+      leaveRemote();m_resolving=false;m_wantPlay=false;
+      notifyError("Connect to Cider in Settings to play Apple Music songs.","play");
+      emit playbackChanged();return;
+    }
+    m_remote=true;
+    m_server.cider()->setVolume(settledVolume());
+    if(m_wantPlay){m_resolving=true;m_server.cider()->play(current(),m_savedPosition);}
+    emit playbackChanged();return;
+  }
+  leaveRemote();
   if(isServerSource(current().value("source"))){
     cancelPreparation();cancel("play");m_recovering=false;m_resolving=true;
     if(!retry&&m_savedPosition>0)m_restorePosition=m_savedPosition;
@@ -951,6 +950,8 @@ void Backend::play() {
     return;
   if (m_index < 0)
     playAt(0);
+  else if (m_remote && m_server.cider()->active())
+    m_server.cider()->resume();
   else if (m_media().source().isEmpty() ||
            m_media().error() != QMediaPlayer::NoError)
     resolveCurrent();
@@ -970,6 +971,7 @@ void Backend::pause() {
     m_resolving = false;
     emit playbackChanged();
   }
+  if(m_remote)m_server.cider()->pause();
   m_media().pause();
 }
 void Backend::stop() {
@@ -985,6 +987,7 @@ void Backend::stop() {
   cancel("play");
   cancel("radio");
   m_resolving = false;
+  leaveRemote();
   m_media().stop();
   m_media().setSource(QUrl());
   emit playbackChanged();
@@ -997,7 +1000,8 @@ void Backend::seek(qint64 p) {
     const qint64 window=qMax(qint64(crossfadeSeconds())*1000,qint64(2500));
     if(total<=0 || total-target>window){endCrossfade(false);clearSpare();}
   }
-  if(m_media().source().isEmpty()){m_savedPosition=target;emit positionChanged();}
+  if(m_remote && m_server.cider()->active())m_server.cider()->seek(target);
+  else if(m_media().source().isEmpty()){m_savedPosition=target;emit positionChanged();}
   else m_media().setPosition(target);
   emit positionChanged();
   emit seeked(target);
@@ -1034,7 +1038,7 @@ void Backend::applyLyrics(const QVariantMap &data) {
 void Backend::fetchLyrics() {
   if(current().isEmpty()||m_lyricsBusy||m_lyricsLoaded)return;
   const auto id=current().value("id").toString();
-  static const QRegularExpression valid("^(?:[A-Za-z0-9_-]{11}|(?:local_|sub_|jf_)[a-f0-9]{64})$");
+  static const QRegularExpression valid("^(?:[A-Za-z0-9_-]{11}|(?:local_|sub_|jf_|am_)[a-f0-9]{64})$");
   if(valid.match(id).hasMatch()) {
     QFile file(dataPath()+"/lyrics/"+id+".lrc");
     if(file.size()<=262144&&file.open(QIODevice::ReadOnly)) {
@@ -1048,10 +1052,14 @@ void Backend::fetchLyrics() {
     if(sidecar.size()<=262144&&sidecar.open(QIODevice::ReadOnly)){const auto text=QString::fromUtf8(sidecar.read(262145));if(!Lrc::parse(text).isEmpty()){applyLyrics({{"ok",true},{"lrc",text},{"source","Local LRC"}});return;}}
   }
   m_lyricsBusy=true;emit lyricsChanged();const auto token=m_trackToken;
-  if(isServerSource(current().value("source"))){
+  const bool apple=current().value("source")=="cider";
+  if(isServerSource(current().value("source")) && !apple){
     m_server.lyrics(current(),[this,token](const QVariantMap &data,const QString &error){if(token!=m_trackToken)return;applyLyrics(data);if(!error.isEmpty())notifyError(error);});return;
   }
-  request("lyrics",{{"op",local.isEmpty()?"lyrics":"local-lyrics"},{"id",id},{"title",current().value("title")},{"artist",current().value("artist")},{"album",current().value("album")},{"seconds",duration()/1000},{"fallback",lyricsFallback()},{"lyricCache",QStandardPaths::writableLocation(QStandardPaths::CacheLocation)+"/lyrics"}},[this,id,token](const QVariantMap &data){
+  // Apple's own lyrics stay inside Apple's player, so an Apple Music song
+  // is looked up by its name the way a local file is, whatever the fallback
+  // setting says: there is no first source for it to fall back from.
+  request("lyrics",{{"op",local.isEmpty()&&!apple?"lyrics":"local-lyrics"},{"id",id},{"title",current().value("title")},{"artist",current().value("artist")},{"album",current().value("album")},{"seconds",duration()/1000},{"fallback",lyricsFallback()||apple},{"lyricCache",QStandardPaths::writableLocation(QStandardPaths::CacheLocation)+"/lyrics"}},[this,id,token](const QVariantMap &data){
     if(id!=current().value("id").toString()||token!=m_trackToken)return;
     applyLyrics(data);if(!data.value("ok").toBool())notifyError(data.value("error").toString());
   });
@@ -1059,7 +1067,7 @@ void Backend::fetchLyrics() {
 void Backend::reloadLyrics(){clearLyrics();fetchLyrics();}
 void Backend::setLyricsFallback(bool enabled){m_settings.setValue("lyricsFallback",enabled);emit settingsChanged();reloadLyrics();}
 void Backend::importLyrics(const QUrl &url,const QString &songId){
-  static const QRegularExpression valid("^(?:[A-Za-z0-9_-]{11}|(?:local_|sub_|jf_)[a-f0-9]{64})$");
+  static const QRegularExpression valid("^(?:[A-Za-z0-9_-]{11}|(?:local_|sub_|jf_|am_)[a-f0-9]{64})$");
   if(!url.isLocalFile()||!valid.match(songId).hasMatch())return;
   QFile input(url.toLocalFile());
   if(input.size()>262144||!input.open(QIODevice::ReadOnly)){notifyError("Choose an LRC file smaller than 256 KiB.");return;}
@@ -1077,7 +1085,7 @@ void Backend::importLyrics(const QUrl &url,const QString &songId){
 }
 void Backend::resetLyrics(){
   const auto id=current().value("id").toString();
-  static const QRegularExpression valid("^(?:[A-Za-z0-9_-]{11}|(?:local_|sub_|jf_)[a-f0-9]{64})$");
+  static const QRegularExpression valid("^(?:[A-Za-z0-9_-]{11}|(?:local_|sub_|jf_|am_)[a-f0-9]{64})$");
   if(valid.match(id).hasMatch()) {QFile f(dataPath()+"/lyrics/"+id+".lrc");if(f.exists()&&!f.remove()){notifyError("Could not remove imported lyrics.");return;}}
   reloadLyrics();
 }
@@ -1094,6 +1102,7 @@ void Backend::applyOutputVolume() {
   // While an overlap is running the fade owns both mixers; it will pick the
   // new level up on its next step.
   if(!m_crossfading)activeAudio().setVolume(settledVolume());
+  m_server.cider()->setVolume(settledVolume());
 }
 // ReplayGain stores the correction directly; R128 stores Q7.8 units against
 // -23 LUFS, which this converts to the same -18 dBFS reference.
@@ -2438,7 +2447,7 @@ QVariantList Backend::trackDetails(const QVariantMap &track) const {
   if(trackNumber>0)add("Track",discNumber>0?QString("%1 on disc %2").arg(trackNumber).arg(discNumber):QString::number(trackNumber));
   else if(discNumber>0)add("Disc",QString::number(discNumber));
   const auto path=track.value("localPath").toString();
-  add("Source",isServerSource(track.value("source"))?"Music server":path.isEmpty()?"YouTube Music":"Local file");
+  add("Source",track.value("source")=="cider"?"Apple Music in Cider":isServerSource(track.value("source"))?"Music server":path.isEmpty()?"YouTube Music":"Local file");
   const int seconds=track.value("seconds").toInt();if(seconds>0)add("Duration",QString("%1:%2").arg(seconds/60).arg(seconds%60,2,10,QChar('0')));
   if(!path.isEmpty()) {const QFileInfo file(path);add("File",path);add("Format",file.suffix().toUpper());add("Available",file.isFile()?"Yes":"File missing");if(file.isFile())add("Size",QLocale().formattedDataSize(file.size()));}
   if(track.value("id")==current().value("id") && !m_media().source().isEmpty()){
@@ -2508,8 +2517,10 @@ void Backend::updateOnlineArtwork() {
     m_onlineArtworkId=id;m_onlineArtworkToken=m_trackToken;m_onlineArtworkAttempted=false;m_onlineArtworkRetries=0;
     m_artworkPage.clear();m_artworkStatus.clear();m_onlineMotionArt.clear();emit onlineArtworkChanged();
   }
-  const bool eligible=enabled && m_uiActive && playing() && !song.value("videoId").toString().isEmpty()
-      && song.value("localPath").toString().isEmpty() && !isServerSource(song.value("source"))
+  // Apple Music songs are Apple's own, so their animated covers are too.
+  const bool apple=song.value("source")=="cider";
+  const bool eligible=enabled && m_uiActive && playing() && (apple || !song.value("videoId").toString().isEmpty())
+      && song.value("localPath").toString().isEmpty() && (apple || !isServerSource(song.value("source")))
       && !song.value("artist").toString().isEmpty();
   if(!eligible){
     m_onlineArtworkTimer.stop();
@@ -2847,4 +2858,61 @@ bool Backend::finishGapless() {
   deck.play();
   adoptHandoff(target);
   return true;
+}
+
+// Shared by Sung's own decks and by Cider, which reports the end of a song
+// on its own clock.
+void Backend::trackEnded() {
+  // A finished recording has nothing left to return to.
+  clearResumePosition(current().value("id").toString());
+  if(m_sleepAtEnd){endCrossfade(false);clearSpare();setSleep(0);pause();emit toast("Sleep timer ended");return;}
+  // Stop instead of advancing, autoplaying or wrapping around.
+  if(m_sleepAtQueueEnd&&!shuffle()&&repeat()==0&&m_index+1>=m_queue.count()){
+    endCrossfade(false);clearSpare();setSleep(0);pause();emit toast("Sleep timer ended");return;}
+  // An overlap runs right up to this moment. The song that was
+  // leaving has now left, so the fade is simply over.
+  if(m_crossfading){endCrossfade(true);return;}
+  if (repeat() == 2) {
+    m_serverListenToken=0;
+    if(m_remote)m_server.cider()->play(current(),0);
+    else{m_media().setPosition(0);m_media().play();}
+  } else if (m_remote || !finishGapless())
+    // Cider's songs cannot be warmed on a spare deck, so they change over
+    // the ordinary way.
+    next();
+}
+void Backend::leaveRemote() {
+  if(!m_remote)return;
+  m_remote=false;
+  m_server.cider()->release();
+}
+void Backend::wireCider() {
+  auto *cider=m_server.cider();
+  // Cider's state stands in for the deck's: the same bookkeeping runs when
+  // it starts, pauses or moves on.
+  connect(cider,&Cider::transportChanged,this,[this]{
+    if(!m_remote)return;
+    const auto *cider=m_server.cider();
+    if(cider->playing()){
+      m_stopped=false;m_resolving=false;
+      if(m_uiActive)m_positionTick.start();
+      recordHistory();notifyTrack();
+    } else if(!cider->starting()){
+      m_positionTick.stop();resetAudioLevels();
+      m_savedPosition=cider->position();
+      m_wantPlay=false;
+    }
+    emit positionChanged();emit playbackChanged();
+  });
+  connect(cider,&Cider::progressed,this,[this]{
+    if(!m_remote)return;
+    if(m_sleepAtEnd)updateSleepGain();
+    considerScrobble();
+  });
+  connect(cider,&Cider::finished,this,[this]{if(m_remote)trackEnded();});
+  connect(cider,&Cider::failed,this,[this](const QString &message){
+    if(!m_remote)return;
+    m_wantPlay=false;m_resolving=false;m_positionTick.stop();
+    notifyError(message,"play");emit playbackChanged();
+  });
 }

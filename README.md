@@ -25,6 +25,7 @@ A minimal Material 3 player built with C++ and Qt Quick, designed for CachyOS an
 - **YouTube Music**: search songs, albums, artists and playlists; play audio without an embedded browser or ad interface, at standard quality or a data saver setting.
 - **Navidrome / Subsonic**: browse and search your server, play original or transcoded audio, edit server playlists, rate songs, sync favorites and listening history, and display server lyrics.
 - **Jellyfin**: browse music libraries, albums, artists and genres; search, stream original or transcoded audio, manage permitted server playlists, sync favorites and display synchronized lyrics.
+- **Apple Music through Cider**: browse your Apple Music library, search Apple's catalogue and play it through [Cider](https://cider.sh), with Sung's queue, lyrics, history and animated covers.
 - **Your music**: import FLAC, MP3 and other supported audio files or folders; browse albums and artists, search paths and group songs by folder. Mix local and YouTube songs in the same playlists.
 - **Animated artwork**: local animated covers and automatic online covers for matching YouTube songs, shared across the player, immersive view and mini player; lists use still covers.
 - **Appearance**: light and dark themes, a pickable Material accent color, artwork-derived color, an ambient cover backdrop, density and per-view layouts.
@@ -201,6 +202,14 @@ Connection settings include audio quality and server listening history. Original
 
 Tested against Navidrome 0.63.2 and Jellyfin 10.11.11 / 12.0. Other servers must support Subsonic 1.16.1 token authentication and JSON responses. OpenSubsonic lyrics and form POST are detected when available. Jellyfin 10.11 removes duplicate playlist additions on the server; 12.0 preserves them. Jellyfin collections are paginated; a single opened collection is limited to 20,000 items. Server administration, video, podcasts, remote-device control and permanent offline downloads are outside this music integration.
 
+### Connect Apple Music through Cider
+
+Apple streams Apple Music only to its own players, so Sung plays it through Cider, the Apple Music client, which needs its own copy and your Apple Music subscription. In Cider, open **Settings → Connectivity → Manage External Application Access** and create a token. In Sung, open **Settings → Connections → Music server**, choose **Cider**, keep the address `http://localhost:10767` unless you changed Cider's port, and paste the token.
+
+**Library → Music server** then lists your Apple Music albums, artists and playlists, **Discover** shows your country's song chart, and the search bar searches Apple's catalogue. Cider must stay open; its window can be minimised. Sung sends it one song at a time and moves to the next when that song ends, so the queue, listening history, lyrics and Motion covers are Sung's. While Sung drives, Cider's own autoplay is turned off and put back when Sung stops or disconnects. If you pick a song in Cider itself, Sung stops following and says so.
+
+The sound comes out of Cider, so Sung's playback speed, crossfade, loudness levelling and visualizer do not apply to Apple Music songs, and the volume slider sets Cider's volume. Apple Music playlists are edited in Cider. Lyrics come from LRCLIB by title and artist, since Apple's own lyrics stay inside Apple's player. This follows Cider 2's documented REST API (`/api/v1/playback` and `/api/v1/amapi/run-v3`).
+
 ### Accounts and saved data
 
 **Settings → Connections → YouTube → Streaming quality** chooses what a song costs to download. Standard takes the best stream YouTube offers, which is Opus at about 130 kbps. Data saver caps it, which lands on Opus at about 67 kbps and a little over half the bytes. Sung buffers the whole song before playing it, so this is the download either way. No account or sign-in is involved, and neither setting is a lossless one; for lossless audio use local files or a music server set to Original.
@@ -265,6 +274,12 @@ python3 tests/navidrome_integration.py \
 ```
 
 The script starts a loopback-only server, creates a temporary account and 105 generated audio fixtures, and tests browsing, playback, seeking, lyrics, playlist edits, ratings, favorites, queue restoration and scrobbling. It stops the server and removes its temporary data afterward. Use a new output directory for each run. With a diagnostics build, add `--ui-binary /path/to/sung` to exercise the rendered interface too.
+
+To check the Cider integration against your own Cider, with Cider open and nothing playing in it, pass the token from its Connectivity settings. It searches Apple Music, plays a song for three seconds and pauses it:
+
+```bash
+SUNG_CIDER_LIVE_TOKEN=... ctest --test-dir build-tests -R cider --output-on-failure
+```
 
 To test Jellyfin with generated music and disposable accounts:
 

@@ -1680,10 +1680,10 @@ ApplicationWindow {
             Icon { name: "search"; ink: Theme.text }
             TextField {
                 font.family: Theme.fontFamily; id: searchField; objectName: "searchField"; Layout.fillWidth: true; Layout.fillHeight: true
-                placeholderText: app.page==="server"?"Search server":"Search music"; placeholderTextColor: Theme.muted
+                placeholderText: app.page==="server"?(app.server.remotePlayback?"Search Apple Music":"Search server"):"Search music"; placeholderTextColor: Theme.muted
                 color: Theme.text; selectionColor: Theme.textSelection; selectedTextColor: Theme.text; cursorDelegate: MCaret {}
                 font.pixelSize: Theme.bodyLarge; background: null; selectByMouse: true
-                Accessible.name: app.page==="server"?"Search music server":"Search songs, albums, artists, playlists, or paste a YouTube link"
+                Accessible.name: app.page==="server"?(app.server.remotePlayback?"Search Apple Music":"Search music server"):"Search songs, albums, artists, playlists, or paste a YouTube link"
                 property var suggestions: []
                 property int highlighted: -1
                 property bool dismissed: false
@@ -2500,11 +2500,11 @@ ApplicationWindow {
                 ColumnLayout {
                     id: settingsGroup3; objectName:"settingsGroup3"
                     Layout.fillWidth:true;Layout.minimumWidth:0; spacing:12
-                    property bool hasMatches: settingsDialog.matches("Music server library") || settingsDialog.matches("YouTube cookies import replace remove sign in") || settingsDialog.matches("YouTube streaming quality standard data saver bitrate")
+                    property bool hasMatches: settingsDialog.matches("Music server library Subsonic Jellyfin Cider Apple Music") || settingsDialog.matches("YouTube cookies import replace remove sign in") || settingsDialog.matches("YouTube streaming quality standard data saver bitrate")
                     visible: settingsDialog.searchQuery.trim() ? hasMatches : settingsDialog.category===4
                     SungText {objectName:"settingsConnectionsHeading";heading: true;visible:!!settingsDialog.searchQuery.trim();text:"Connections";font.pixelSize:Theme.titleLarge;emphasized: true;Layout.bottomMargin:8}
                     ColumnLayout {id:options3;objectName:"settingsRows3";Layout.fillWidth:true;Layout.minimumWidth:0;spacing:12
-                MSettingRow {opens:true;objectName:"musicServerButton";text:"Music server";visible:settingsDialog.matches("Music server library");onClicked:{settingsDialog.close();serverConnection.open()}}
+                MSettingRow {opens:true;objectName:"musicServerButton";text:"Music server";visible:settingsDialog.matches("Music server library Subsonic Jellyfin Cider Apple Music");onClicked:{settingsDialog.close();serverConnection.open()}}
                 SungText {objectName:"youtubeGroupHeading"; visible: settingsDialog.matches("YouTube cookies import replace remove sign in") || settingsDialog.matches("YouTube streaming quality standard data saver bitrate"); text: "YouTube"; font.pixelSize: Theme.labelLarge; labelRole: true; color: Theme.muted; Layout.topMargin: 12 }
                 SungText { visible: settingsDialog.matches("YouTube streaming quality standard data saver bitrate"); text: "Streaming quality"; font.pixelSize: Theme.titleMedium; typeRole:"titleMedium" }
                 MSegmentedControl {Layout.fillWidth:true;Layout.minimumWidth:0;

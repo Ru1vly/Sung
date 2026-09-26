@@ -39,7 +39,7 @@ Item {
         if (measured < 0) { fill = 0; return }
         fill = measured
         if (!app.playing || !app.motion) return
-        const remaining = (1-measured)*app.lyricSpan/Math.max(0.1,app.playbackRate)
+        const remaining = (1-measured)*app.lyricSpan/Math.max(0.1,app.externalPlayback?1:app.playbackRate)
         if (remaining <= 16) { fill = 1; return }
         sweep.duration = remaining
         sweep.start()

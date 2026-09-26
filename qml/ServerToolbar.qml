@@ -19,7 +19,8 @@ ColumnLayout {
             Row {
                 id: categoryRow; spacing: 6
                 Repeater {
-                    model: [{key:"albums",label:"Albums"},{key:"artists",label:"Artists"},{key:"genres",label:"Genres"},{key:"playlists",label:"Playlists"},{key:"favorites",label:"Favorites"},{key:"random",label:"Discover"}]
+                    // Each provider lists only the views it can fill.
+                    model: [{key:"albums",label:"Albums"},{key:"artists",label:"Artists"},{key:"genres",label:"Genres"},{key:"playlists",label:"Playlists"},{key:"favorites",label:"Favorites"},{key:"random",label:"Discover"}].filter(mode=>app.server.modes.indexOf(mode.key)>=0)
                     MChip { required property var modelData; text: modelData.label; selected: app.serverRequest.mode===modelData.key; enabled: app.server.connected; onClicked: app.browseServer(modelData.key); onActiveFocusChanged: if(activeFocus)categories.reveal(this) }
                 }
             }
@@ -32,9 +33,9 @@ ColumnLayout {
     MMenu {
         id: options
         MMenuItem { text: "Connection settings"; onTriggered: toolbar.connectRequested() }
-        MMenuItem { text: "Music library"; enabled: app.server.connected && app.server.folders.length>0; onTriggered: folders.popup(serverActions,serverActions.width-folders.width,serverActions.height+4) }
-        MDivider {}
-        MMenuItem { text: "New server playlist"; enabled: app.server.connected; onTriggered: {name.clear();newPlaylist.open()} }
+        MMenuItem { text: "Music library"; visible: !app.server.remotePlayback; enabled: app.server.connected && app.server.folders.length>0; onTriggered: folders.popup(serverActions,serverActions.width-folders.width,serverActions.height+4) }
+        MDivider { visible: !app.server.remotePlayback }
+        MMenuItem { text: "New server playlist"; visible: !app.server.remotePlayback; enabled: app.server.connected; onTriggered: {name.clear();newPlaylist.open()} }
         MMenuItem { text: "Save queue to server"; visible: app.server.supportsQueue; enabled: app.server.connected && app.queue.count>0; onTriggered: app.saveServerQueue() }
         MMenuItem { text: "Restore server queue"; visible: app.server.supportsQueue; enabled: app.server.connected; onTriggered: restoreQueue.open() }
     }

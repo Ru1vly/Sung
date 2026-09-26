@@ -396,6 +396,7 @@ int main(int argc, char **argv) {
   if(args.contains("--material-detail-test")){QTimer::singleShot(0,&app,[&]{runMaterialDetailTests(&backend,window);});return app.exec();}
   if(args.contains("--material-components-test")){QTimer::singleShot(0,&app,[&]{runMaterialComponentTests(&backend,window);});return app.exec();}
   if(args.contains("--motion-layout-test")){QTimer::singleShot(0,&app,[&]{runMotionLayoutTests(&backend,window);});return app.exec();}
+  if(args.contains("--cider-test")){QTimer::singleShot(0,&app,[&]{runCiderTests(&backend,window);});return app.exec();}
   if(args.contains("--material-conformance-test")){QTimer::singleShot(0,&app,[&]{runMaterialConformanceTests(&backend,window);});return app.exec();}
   if(args.contains("--material-foundations-test")){QTimer::singleShot(0,&app,[&]{runMaterialFoundationTests(&backend,window);});return app.exec();}
   if(args.contains("--window-wash-test")){QTimer::singleShot(0,&app,[&]{runWindowWashTests(&backend,window);});return app.exec();}

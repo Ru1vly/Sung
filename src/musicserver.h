@@ -1,8 +1,9 @@
 #pragma once
+#include "cider.h"
 #include "jellyfin.h"
 #include "subsonic.h"
 inline bool isServerSource(const QVariant &source) {
-  return source == "subsonic" || source == "jellyfin";
+  return source == "subsonic" || source == "jellyfin" || source == "cider";
 }
 class MusicServer : public QObject {
   Q_OBJECT
@@ -21,16 +22,24 @@ class MusicServer : public QObject {
   Q_PROPERTY(QString provider READ provider NOTIFY changed)
   Q_PROPERTY(bool supportsRating READ supportsRating NOTIFY changed)
   Q_PROPERTY(bool supportsQueue READ supportsQueue NOTIFY changed)
+  // The library views this provider can list, as the page's chips name them.
+  Q_PROPERTY(QStringList modes READ modes NOTIFY changed)
+  // Songs from this provider play in another application, not in Sung.
+  Q_PROPERTY(bool remotePlayback READ remotePlayback NOTIFY changed)
   // Jellyfin hides Subsonic's members rather than overriding them, so the
   // call has to reach the concrete type: a generic lambda gets it.
   template <class Call> decltype(auto) with(Call call) const {
     if (m_provider == "jellyfin")
       return call(m_jelly);
+    if (m_provider == "cider")
+      return call(m_cider);
     return call(m_sub);
   }
   template <class Call> decltype(auto) with(Call call) {
     if (m_provider == "jellyfin")
       return call(m_jelly);
+    if (m_provider == "cider")
+      return call(m_cider);
     return call(m_sub);
   }
 
@@ -41,6 +50,14 @@ public:
   QString provider() const { return m_provider; }
   bool supportsRating() const { return m_provider == "subsonic"; }
   bool supportsQueue() const { return m_provider == "subsonic"; }
+  QStringList modes() const {
+    if (m_provider == "cider")
+      return {"albums", "artists", "playlists", "random"};
+    return {"albums", "artists", "genres", "playlists", "favorites", "random"};
+  }
+  bool remotePlayback() const { return m_provider == "cider"; }
+  Cider *cider() { return &m_cider; }
+  const Cider *cider() const { return &m_cider; }
   Q_INVOKABLE void selectProvider(const QString &provider);
   bool connected() const { return with([](auto &s) { return s.connected(); }); }
   bool connecting() const { return with([](auto &s) { return s.connecting(); }); }
@@ -135,4 +152,5 @@ private:
   QString m_provider;
   Subsonic m_sub;
   Jellyfin m_jelly;
+  Cider m_cider;
 };

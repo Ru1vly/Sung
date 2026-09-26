@@ -40,7 +40,7 @@ public:
     if(role==Qt::UserRole+2) return CollectionView::folder(rows[i.row()].toMap());
     if(role==Qt::UserRole+1) {
       const auto t=rows[i.row()].toMap();
-      return isServerSource(t.value("source")) ? "Music server" : !t.value("localPath").toString().isEmpty() ? "Local files" : "YouTube Music";
+      return t.value("source") == "cider" ? "Apple Music" : isServerSource(t.value("source")) ? "Music server" : !t.value("localPath").toString().isEmpty() ? "Local files" : "YouTube Music";
     }
     return {};
   }
@@ -128,6 +128,9 @@ class Backend : public QObject {
   Q_PROPERTY(QVariantList audioSpectrum READ audioSpectrum NOTIFY audioSpectrumChanged)
   Q_PROPERTY(bool spectrumActive READ spectrumActive WRITE setSpectrumActive NOTIFY spectrumActiveChanged)
   Q_PROPERTY(bool playing READ playing NOTIFY playbackChanged)
+  // The current song is sounding in Cider rather than in Sung, so Sung's own
+  // audio work (speed, levelling, the meters) does not reach it.
+  Q_PROPERTY(bool externalPlayback READ externalPlayback NOTIFY playbackChanged)
   Q_PROPERTY(bool resolving READ resolving NOTIFY playbackChanged)
   Q_PROPERTY(bool buffering READ buffering NOTIFY playbackChanged)
   Q_PROPERTY(QString coverPlayId READ coverPlayId NOTIFY playbackChanged)
@@ -340,18 +343,24 @@ public:
   QVariantMap current() const { return m_queue.get(m_index); }
   int currentIndex() const { return m_index; }
   bool playing() const {
+    if (m_remote) return m_server.cider()->playing();
     return m_media().playbackState() == QMediaPlayer::PlayingState;
   }
+  bool externalPlayback() const { return m_remote; }
   QString coverPlayId() const { return m_coverPlayId; }
   bool resolving() const { return m_resolving; }
-  bool buffering() const { return m_wantPlay && (m_resolving || m_media().mediaStatus()==QMediaPlayer::LoadingMedia || m_media().mediaStatus()==QMediaPlayer::StalledMedia || m_media().mediaStatus()==QMediaPlayer::BufferingMedia); }
-  qint64 position() const { return m_media().source().isEmpty() ? m_savedPosition : m_media().position(); }
+  bool buffering() const { return m_wantPlay && (m_resolving || (m_remote && m_server.cider()->starting()) || m_media().mediaStatus()==QMediaPlayer::LoadingMedia || m_media().mediaStatus()==QMediaPlayer::StalledMedia || m_media().mediaStatus()==QMediaPlayer::BufferingMedia); }
+  qint64 position() const {
+    if (m_remote && m_server.cider()->active()) return m_server.cider()->position();
+    return m_media().source().isEmpty() ? m_savedPosition : m_media().position();
+  }
   qint64 duration() const {
     // With no current track and a stopped deck the player may still hold the
     // last source; the interface says "Nothing playing" and its seek bar must
     // not offer that source's length. A source played without a queue
     // (--smoke-local) still reports its own.
     if (m_index < 0 && m_media().playbackState() == QMediaPlayer::StoppedState) return 0;
+    if (m_remote && m_server.cider()->duration() > 0) return m_server.cider()->duration();
     return m_media().duration() > 0
                ? m_media().duration()
                : current().value("seconds").toLongLong() * 1000;
@@ -847,6 +856,8 @@ private:
   QAudioBufferOutput m_visualAudio;
   QMediaPlayer m_deckA, m_deckB;
   bool m_usingB = false;
+  // The current song plays in Cider; see Cider.
+  bool m_remote = false;
   QMediaPlayer &m_media() { return m_usingB ? m_deckB : m_deckA; }
   const QMediaPlayer &m_media() const { return m_usingB ? m_deckB : m_deckA; }
   QMediaPlayer &spareDeck() { return m_usingB ? m_deckA : m_deckB; }
@@ -872,6 +883,12 @@ private:
   void stepCrossfade();
   void endCrossfade(bool completed);
   void clearSpare();
+  // What happens when the song being heard reaches its end, wherever it
+  // was playing.
+  void trackEnded();
+  // Hands playback back from Cider to Sung's own decks.
+  void leaveRemote();
+  void wireCider();
   // The queue position the spare deck is holding, or -1 when it holds nothing.
   int m_handoffIndex = -1;
   bool m_handoffPrepared = false;

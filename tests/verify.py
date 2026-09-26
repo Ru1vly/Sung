@@ -122,6 +122,8 @@ if ready:
                       ("material-emphasis","--material-emphasis-test")]:
         e=profile(name+"-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/name))
         stage(name,[str(build/"sung"),"--isolated",flag],420,e)
+    e=profile("cider-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_CIDER_FIXTURE=str(root/"tests/cider_fixture.py"),SUNG_TEST_OUTPUT=str(out/"cider"))
+    stage("cider",[str(build/"sung"),"--isolated","--cider-test"],300,e)
     e=profile("interface-audit-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"interface-audit"))
     stage("interface-audit",[str(build/"sung"),"--isolated","--interface-audit-test"],300,e)
     e=profile("layout-audit-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"layout-audit"))

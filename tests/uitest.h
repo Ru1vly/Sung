@@ -52,6 +52,7 @@ void runImmersivePreferencesTest(Backend*,QQuickWindow*);
 
 void runAmbientImmersiveTests(Backend*,QQuickWindow*);
 void runMotionLayoutTests(Backend*,QQuickWindow*);
+void runCiderTests(Backend*,QQuickWindow*);
 void runPersonalizationTests(Backend*,QQuickWindow*);
 void runHomeRailTests(Backend*,QQuickWindow*);
 void runOnboardingTests(Backend*,QQuickWindow*);
