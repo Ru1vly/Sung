@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest.mock import patch, MagicMock
 
 spec=importlib.util.spec_from_file_location('catalog',pathlib.Path(__file__).parents[1]/'helper/catalog.py')
 catalog=importlib.util.module_from_spec(spec)
@@ -156,5 +157,114 @@ class CatalogTests(unittest.TestCase):
 
     def test_image_size(self):
         self.assertEqual(catalog.artwork({'thumbnails':[{'url':'https://yt3.googleusercontent.com/a=w60-h60-l90-rj'}]}),'https://yt3.googleusercontent.com/a=w544-h544-l90-rj')
+
+    def test_parse_credentials_formats(self):
+        # 1. Innertube token format
+        token = '***INNERTUBE COOKIE*** = SAPISID=sec123; SID=sid123\n***AUTH USER*** = 2'
+        cmap, sapisid, user, _, _ = catalog.parse_credentials(token)
+        self.assertEqual(sapisid, 'sec123')
+        self.assertEqual(user, '2')
+        self.assertEqual(cmap.get('SID'), 'sid123')
+
+        # 2. Netscape cookies format
+        netscape = '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\tnet123\n'
+        cmap, sapisid, user, _, _ = catalog.parse_credentials(netscape)
+        self.assertEqual(sapisid, 'net123')
+
+        # 3. HTTP headers format
+        headers = 'Cookie: SAPISID=hdr123; HSID=h123\r\nX-Goog-AuthUser: 1'
+        cmap, sapisid, user, _, _ = catalog.parse_credentials(headers)
+        self.assertEqual(sapisid, 'hdr123')
+        self.assertEqual(user, '1')
+
+        # 4. Raw cookie string
+        raw = 'SAPISID=raw123; OTHER=oth'
+        cmap, sapisid, user, _, _ = catalog.parse_credentials(raw)
+        self.assertEqual(sapisid, 'raw123')
+
+        # 5. Missing SAPISID
+        cmap, sapisid, user, _, _ = catalog.parse_credentials('RANDOM=val')
+        self.assertIsNone(sapisid)
+
+    def test_yt_account_and_sync_ops(self):
+        from unittest.mock import patch, MagicMock
+        import tempfile
+        api = MagicMock()
+        api.get_account_info.return_value = {
+            'accountName': 'Test Singer',
+            'channelHandle': '@testsinger',
+            'accountPhotoUrl': 'https://example.com/photo.jpg',
+        }
+        api.get_liked_songs.return_value = {
+            'tracks': [{
+                'videoId': 'vid12345678',
+                'title': 'Liked Song',
+                'artists': [{'name': 'Liked Artist', 'id': 'art1'}],
+                'album': {'name': 'Liked Album', 'id': 'alb1'},
+                'duration': '2:30',
+                'duration_seconds': 150,
+            }]
+        }
+        api.get_library_playlists.return_value = [
+            {'playlistId': 'LM', 'title': 'Liked Music'},
+            {'playlistId': 'PLremote123', 'title': 'My Remote Playlist'}
+        ]
+        api.get_playlist.return_value = {
+            'title': 'My Remote Playlist',
+            'tracks': [{
+                'videoId': 'vid87654321',
+                'title': 'Playlist Track',
+                'artists': [{'name': 'Artist 2'}],
+            }]
+        }
+
+        with patch.dict('sys.modules', {'ytmusicapi': MagicMock(YTMusic=MagicMock(return_value=api))}):
+            with tempfile.TemporaryDirectory() as td:
+                res = catalog.run({
+                    'op': 'yt-account',
+                    'credentials': 'SAPISID=valid_sapisid; SID=valid_sid',
+                    'dataPath': td
+                })
+                self.assertTrue(res['ok'])
+                self.assertEqual(res['name'], 'Test Singer')
+                self.assertEqual(res['handle'], '@testsinger')
+                self.assertEqual(res['photo'], 'https://example.com/photo.jpg')
+                self.assertTrue(pathlib.Path(res['cookieFile']).is_file())
+                self.assertTrue(pathlib.Path(res['authFile']).is_file())
+
+                # Test sync
+                sync_res = catalog.run({
+                    'op': 'yt-sync',
+                    'cookies': res['cookieFile'],
+                    'dataPath': td
+                })
+                self.assertTrue(sync_res['ok'])
+                self.assertEqual(len(sync_res['liked']), 1)
+                self.assertEqual(sync_res['liked'][0]['id'], 'vid12345678')
+                self.assertEqual(len(sync_res['playlists']), 1)
+                self.assertEqual(sync_res['playlists'][0]['id'], 'PLremote123')
+                self.assertEqual(len(sync_res['playlists'][0]['tracks']), 1)
+
+                # Test like
+                like_res = catalog.run({
+                    'op': 'yt-like',
+                    'id': 'vid12345678',
+                    'liked': True,
+                    'cookies': res['cookieFile'],
+                })
+                self.assertTrue(like_res['ok'])
+                api.rate_song.assert_called_with('vid12345678', 'LIKE')
+
+    def test_browser_login_flow(self):
+        import tempfile
+        with patch.object(catalog, 'extract_browser_cookies', return_value={'ok': True, 'cookies': 'SAPISID=sec1; SID=s1', 'browser': 'testbrowser'}):
+            api = MagicMock()
+            api.get_account_info.return_value = {'accountName': 'Browser User', 'channelHandle': '@browser', 'accountPhotoUrl': ''}
+            with patch.dict('sys.modules', {'ytmusicapi': MagicMock(YTMusic=MagicMock(return_value=api))}):
+                with tempfile.TemporaryDirectory() as td:
+                    res = catalog.run({'op': 'yt-browser-login', 'mode': 'browser', 'dataPath': td})
+                    self.assertTrue(res['ok'])
+                    self.assertEqual(res['name'], 'Browser User')
+                    self.assertEqual(res['browser'], 'testbrowser')
 
 if __name__=='__main__':unittest.main()

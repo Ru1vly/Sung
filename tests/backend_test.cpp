@@ -917,6 +917,102 @@ private slots:
     b.setCookieFile(QUrl::fromLocalFile(files.filePath("missing")));
     QVERIFY(!b.error().isEmpty());
   }
+  void youtubeAccountLoginSyncAndLogout() {
+    qputenv("SUNG_HELPER", qgetenv("SUNG_FIXTURE_HELPER"));
+    qputenv("SUNG_PYTHON", "python3");
+    Backend b;
+    b.clearQueue();
+    QVERIFY(!b.ytLoggedIn());
+    QVERIFY(b.ytLastSyncTime().isEmpty());
+
+    // Empty credentials error
+    b.loginYouTube("");
+    QVERIFY(!b.error().isEmpty());
+    b.dismissError();
+
+    // Invalid credentials error
+    b.loginYouTube("invalid");
+    QTRY_VERIFY_WITH_TIMEOUT(!b.error().isEmpty(), 5000);
+    QVERIFY(!b.ytLoggedIn());
+    b.dismissError();
+
+    // Valid login
+    QSignalSpy accountSpy(&b, &Backend::ytAccountChanged);
+    QSignalSpy syncSpy(&b, &Backend::ytSyncChanged);
+    b.loginYouTube("valid_sapisid_token");
+    QTRY_VERIFY_WITH_TIMEOUT(b.ytLoggedIn(), 5000);
+    QCOMPARE(b.ytAccountName(), QString("Fixture User"));
+    QCOMPARE(b.ytAccountHandle(), QString("@fixture"));
+    QCOMPARE(b.ytAccountPhoto(), QString("https://example.com/avatar.jpg"));
+    QVERIFY(accountSpy.count() > 0);
+
+    // Auto-sync finishes
+    QTRY_VERIFY_WITH_TIMEOUT(!b.ytSyncing(), 5000);
+    QVERIFY(!b.ytLastSyncTime().isEmpty());
+    QVERIFY(syncSpy.count() > 0);
+
+    // Verify synced liked songs
+    QVERIFY(b.isLiked("00000000010"));
+    QVERIFY(b.isLiked("00000000011"));
+
+    // Verify synced playlist
+    bool foundPlaylist = false;
+    for (const auto &p : b.playlists()) {
+      if (p.toMap().value("id").toString() == "PLfixture") {
+        foundPlaylist = true;
+        QCOMPARE(p.toMap().value("title").toString(), QString("Fixture Playlist"));
+      }
+    }
+    QVERIFY(foundPlaylist);
+
+    // Toggle like
+    b.toggleLike(track("00000000012"));
+    QVERIFY(b.isLiked("00000000012"));
+    b.toggleLike(track("00000000012"));
+    QVERIFY(!b.isLiked("00000000012"));
+
+    // Startup sync setting
+    QVERIFY(b.ytSyncOnStartup());
+    b.setYtSyncOnStartup(false);
+    QVERIFY(!b.ytSyncOnStartup());
+    b.setYtSyncOnStartup(true);
+
+    // Logout keeping data
+    b.logoutYouTube(false);
+    QVERIFY(!b.ytLoggedIn());
+    QVERIFY(b.ytAccountName().isEmpty());
+    QVERIFY(b.isLiked("00000000010"));
+
+    // Login and logout clearing data
+    b.loginYouTube("valid_sapisid_token");
+    QTRY_VERIFY_WITH_TIMEOUT(b.ytLoggedIn(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!b.ytSyncing(), 5000);
+    b.logoutYouTube(true);
+    QVERIFY(!b.ytLoggedIn());
+    QVERIFY(!b.isLiked("00000000010"));
+    bool stillHasPlaylist = false;
+    for (const auto &p : b.playlists()) {
+      if (p.toMap().value("id").toString() == "PLfixture")
+        stillHasPlaylist = true;
+    }
+    QVERIFY(!stillHasPlaylist);
+
+    // Test browser and web login
+    b.loginYouTubeBrowser();
+    QTRY_VERIFY_WITH_TIMEOUT(b.ytLoggedIn(), 5000);
+    QCOMPARE(b.ytAccountName(), QString("Fixture User"));
+    b.logoutYouTube(true);
+    QVERIFY(!b.ytLoggedIn());
+
+    b.loginYouTubeWeb();
+    QTRY_VERIFY_WITH_TIMEOUT(b.ytLoggedIn(), 5000);
+    QCOMPARE(b.ytAccountName(), QString("Fixture User"));
+    b.logoutYouTube(true);
+    QVERIFY(!b.ytLoggedIn());
+
+    qunsetenv("SUNG_HELPER");
+    qunsetenv("SUNG_PYTHON");
+  }
   void noctaliaUpdatesAtomically() {
     QTemporaryDir files;
     const auto path=files.filePath("noctalia.colors");

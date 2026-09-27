@@ -193,6 +193,14 @@ Backend::Backend(QObject *parent) : QObject(parent) {
   setupServer();
   wireCider();
   setupFolderWatching();
+  m_ytLoggedIn = m_settings.value("ytLoggedIn", false).toBool();
+  m_ytAccountName = m_settings.value("ytAccountName").toString();
+  m_ytAccountHandle = m_settings.value("ytAccountHandle").toString();
+  m_ytAccountPhoto = m_settings.value("ytAccountPhoto").toString();
+  m_ytLastSyncEpoch = m_settings.value("ytLastSyncTime", 0).toLongLong();
+  if (m_ytLoggedIn && ytSyncOnStartup() && !qEnvironmentVariableIsSet("SUNG_ISOLATED")) {
+    QTimer::singleShot(2500, this, [this] { syncYouTubeLibrary(); });
+  }
 }
 Backend::~Backend() {
   m_portMonitor.kill();m_portProbe.kill();m_portMonitor.waitForFinished(500);m_portProbe.waitForFinished(500);
@@ -219,6 +227,8 @@ void Backend::cancel(const QString &channel) {
 }
 void Backend::request(const QString &channel, QVariantMap args, Callback done, std::shared_ptr<QTemporaryDir> lifetime) {
   cancel(channel);
+  if (!args.contains("dataPath"))
+    args["dataPath"] = dataPath();
   auto p = new QProcess(this);
   // Keep the unique directory alive until the worker has actually exited, even
   // when cancel() disconnects the backend callback while killing its process group.
@@ -241,7 +251,7 @@ void Backend::request(const QString &channel, QVariantMap args, Callback done, s
   }
   auto timer = new QTimer(p);
   timer->setSingleShot(true);
-  timer->setInterval((channel == "play" || channel == "prepare") ? 75000 : 45000);
+  timer->setInterval(channel == "yt-browser-login" ? 300000 : (channel == "play" || channel == "prepare") ? 75000 : 45000);
   connect(timer, &QTimer::timeout, this, [this, channel, done] {
     cancel(channel);
     done({{"ok", false}, {"error", "Connection timed out. Try again."}});
@@ -284,12 +294,12 @@ void Backend::notifyError(const QString &message, const QString &retryTarget) {
       m_error.contains("ConnectionError") || m_error.contains("timed out"))
     m_error =
         "Couldn’t connect to YouTube. Check your connection and try again.";
-  else if (m_error.contains("Sign in") || m_error.contains("sign in") ||
-           m_error.contains("bot"))
+  else if (retryTarget == "play" && (m_error.contains("Sign in") || m_error.contains("sign in") ||
+           m_error.contains("bot")))
     m_error =
         "YouTube requires sign-in for this track. Import cookies in Settings.";
-  else if (m_error.contains("not available") ||
-           m_error.contains("Video unavailable"))
+  else if (retryTarget == "play" && (m_error.contains("not available") ||
+           m_error.contains("Video unavailable")))
     m_error = "This track isn’t available. Try another upload.";
   m_error = m_error.left(350);
   emit errorChanged();
@@ -1319,6 +1329,11 @@ void Backend::setCookieFile(const QUrl &url) {
   m_settings.setValue("cookies", path);
   emit settingsChanged();
   emit toast("Cookies imported");
+
+  const QString content = QString::fromUtf8(bytes);
+  if (content.contains("SAPISID") || content.contains("__Secure-3PAPISID") || content.contains("__Secure-1PAPISID")) {
+    loginYouTube(content);
+  }
 }
 void Backend::clearCookies() {
   const auto p = cookies();
@@ -1327,6 +1342,257 @@ void Backend::clearCookies() {
   cancelPreparation();m_streams.clear();
   m_settings.remove("cookies");
   emit settingsChanged();
+  if (m_ytLoggedIn) {
+    logoutYouTube(false);
+  }
+}
+QString Backend::ytLastSyncTime() const {
+  if (m_ytLastSyncEpoch <= 0) return {};
+  const qint64 diff = QDateTime::currentSecsSinceEpoch() - m_ytLastSyncEpoch;
+  if (diff < 60) return "Just now";
+  if (diff < 3600) return QString("%1m ago").arg(diff / 60);
+  if (diff < 86400) return QString("%1h ago").arg(diff / 3600);
+  return QString("%1d ago").arg(diff / 86400);
+}
+void Backend::setYtSyncOnStartup(bool enabled) {
+  if (ytSyncOnStartup() == enabled) return;
+  m_settings.setValue("ytSyncOnStartup", enabled);
+  emit settingsChanged();
+}
+void Backend::loginYouTube(const QString &credentials) {
+  const auto creds = credentials.trimmed();
+  if (creds.isEmpty()) {
+    notifyError("Please provide YouTube Music cookies or login token.");
+    return;
+  }
+  m_ytSyncing = true;
+  m_ytSyncStatus = "Connecting to YouTube Music...";
+  emit ytSyncChanged();
+
+  request("yt-account", {{"op", "yt-account"}, {"credentials", creds}, {"dataPath", dataPath()}}, [this](const QVariantMap &data) {
+    m_ytSyncing = false;
+    m_ytSyncStatus.clear();
+    if (!data.value("ok").toBool()) {
+      emit ytSyncChanged();
+      notifyError(data.value("error", "Failed to sign in to YouTube Music.").toString());
+      return;
+    }
+    m_ytLoggedIn = true;
+    m_ytAccountName = data.value("name").toString();
+    m_ytAccountHandle = data.value("handle").toString();
+    m_ytAccountPhoto = data.value("photo").toString();
+    m_settings.setValue("ytLoggedIn", true);
+    m_settings.setValue("ytAccountName", m_ytAccountName);
+    m_settings.setValue("ytAccountHandle", m_ytAccountHandle);
+    m_settings.setValue("ytAccountPhoto", m_ytAccountPhoto);
+    QString cookieFile = data.value("cookieFile").toString();
+    if (cookieFile.isEmpty())
+      cookieFile = dataPath() + "/cookies.txt";
+    if (QFile::exists(cookieFile)) {
+      m_settings.setValue("cookies", cookieFile);
+      emit settingsChanged();
+    }
+    emit ytAccountChanged();
+    emit ytSyncChanged();
+    emit toast("Signed in to YouTube Music");
+    syncYouTubeLibrary();
+  });
+}
+void Backend::loginYouTubeWeb() {
+  m_ytSyncing = true;
+  m_ytSyncStatus = "Waiting for Google sign-in...";
+  emit ytSyncChanged();
+
+  request("yt-browser-login", {{"op", "yt-browser-login"}, {"mode", "web"}, {"dataPath", dataPath()}}, [this](const QVariantMap &data) {
+    m_ytSyncing = false;
+    m_ytSyncStatus.clear();
+    if (!data.value("ok").toBool()) {
+      emit ytSyncChanged();
+      notifyError(data.value("error", "Sign-in was cancelled or failed.").toString());
+      return;
+    }
+    m_ytLoggedIn = true;
+    m_ytAccountName = data.value("name").toString();
+    m_ytAccountHandle = data.value("handle").toString();
+    m_ytAccountPhoto = data.value("photo").toString();
+    m_settings.setValue("ytLoggedIn", true);
+    m_settings.setValue("ytAccountName", m_ytAccountName);
+    m_settings.setValue("ytAccountHandle", m_ytAccountHandle);
+    m_settings.setValue("ytAccountPhoto", m_ytAccountPhoto);
+    QString cookieFile = data.value("cookieFile").toString();
+    if (cookieFile.isEmpty())
+      cookieFile = dataPath() + "/cookies.txt";
+    if (QFile::exists(cookieFile)) {
+      m_settings.setValue("cookies", cookieFile);
+      emit settingsChanged();
+    }
+    emit ytAccountChanged();
+    emit ytSyncChanged();
+    emit toast("Signed in to YouTube Music");
+    syncYouTubeLibrary();
+  });
+}
+void Backend::loginYouTubeBrowser() {
+  m_ytSyncing = true;
+  m_ytSyncStatus = "Connecting to installed browser...";
+  emit ytSyncChanged();
+
+  request("yt-browser-login", {{"op", "yt-browser-login"}, {"mode", "browser"}, {"dataPath", dataPath()}}, [this](const QVariantMap &data) {
+    m_ytSyncing = false;
+    m_ytSyncStatus.clear();
+    if (!data.value("ok").toBool()) {
+      emit ytSyncChanged();
+      notifyError(data.value("error", "No active YouTube session found in installed browsers.").toString());
+      return;
+    }
+    m_ytLoggedIn = true;
+    m_ytAccountName = data.value("name").toString();
+    m_ytAccountHandle = data.value("handle").toString();
+    m_ytAccountPhoto = data.value("photo").toString();
+    m_settings.setValue("ytLoggedIn", true);
+    m_settings.setValue("ytAccountName", m_ytAccountName);
+    m_settings.setValue("ytAccountHandle", m_ytAccountHandle);
+    m_settings.setValue("ytAccountPhoto", m_ytAccountPhoto);
+    QString cookieFile = data.value("cookieFile").toString();
+    if (cookieFile.isEmpty())
+      cookieFile = dataPath() + "/cookies.txt";
+    if (QFile::exists(cookieFile)) {
+      m_settings.setValue("cookies", cookieFile);
+      emit settingsChanged();
+    }
+    emit ytAccountChanged();
+    emit ytSyncChanged();
+    emit toast(QString("Signed in from %1").arg(data.value("browser", "browser").toString()));
+    syncYouTubeLibrary();
+  });
+}
+void Backend::logoutYouTube(bool clearData) {
+  if (!m_ytLoggedIn && !m_settings.contains("ytLoggedIn")) return;
+  m_ytLoggedIn = false;
+  m_ytAccountName.clear();
+  m_ytAccountHandle.clear();
+  m_ytAccountPhoto.clear();
+  m_ytSyncing = false;
+  m_ytSyncStatus.clear();
+  m_ytLastSyncEpoch = 0;
+
+  m_settings.remove("ytLoggedIn");
+  m_settings.remove("ytAccountName");
+  m_settings.remove("ytAccountHandle");
+  m_settings.remove("ytAccountPhoto");
+  m_settings.remove("ytLastSyncTime");
+
+  QFile::remove(dataPath() + "/auth.json");
+  const auto p = cookies();
+  if (p == dataPath() + "/cookies.txt")
+    QFile::remove(p);
+  cancelPreparation();
+  m_streams.clear();
+  m_settings.remove("cookies");
+  emit settingsChanged();
+
+  if (clearData) {
+    QVariantList keptFavorites;
+    for (const auto &item : m_favorites) {
+      if (!item.toMap().value("fromYouTube", false).toBool())
+        keptFavorites.append(item);
+    }
+    m_favorites = keptFavorites;
+
+    QVariantList keptPlaylists;
+    for (const auto &pl : m_playlists) {
+      if (!pl.toMap().value("isYouTube", false).toBool())
+        keptPlaylists.append(pl);
+    }
+    m_playlists = keptPlaylists;
+
+    save();
+    emit libraryChanged();
+  }
+
+  emit ytAccountChanged();
+  emit ytSyncChanged();
+  emit toast("Signed out of YouTube Music");
+}
+void Backend::syncYouTubeLibrary() {
+  if (!m_ytLoggedIn) {
+    notifyError("Sign in to YouTube Music to sync your library.");
+    return;
+  }
+  if (m_ytSyncing)
+    return;
+  m_ytSyncing = true;
+  m_ytSyncStatus = "Syncing with YouTube Music...";
+  emit ytSyncChanged();
+
+  request("yt-sync", {{"op", "yt-sync"}, {"dataPath", dataPath()}}, [this](const QVariantMap &data) {
+    m_ytSyncing = false;
+    if (!data.value("ok").toBool()) {
+      m_ytSyncStatus = "Sync failed";
+      emit ytSyncChanged();
+      notifyError(data.value("error", "Failed to sync YouTube Music library.").toString());
+      return;
+    }
+    m_ytSyncStatus.clear();
+    m_ytLastSyncEpoch = QDateTime::currentSecsSinceEpoch();
+    m_settings.setValue("ytLastSyncTime", m_ytLastSyncEpoch);
+
+    const auto incomingLiked = playable(data.value("liked").toList());
+    QSet<QString> existingFavoriteIds;
+    for (const auto &v : m_favorites)
+      existingFavoriteIds.insert(itemId(v));
+    for (const auto &v : incomingLiked) {
+      auto track = v.toMap();
+      track["fromYouTube"] = true;
+      const QString id = itemId(track);
+      if (!existingFavoriteIds.contains(id)) {
+        m_favorites.append(track);
+        existingFavoriteIds.insert(id);
+      }
+    }
+
+    const auto incomingPlaylists = data.value("playlists").toList();
+    for (const auto &pv : incomingPlaylists) {
+      const auto pMap = pv.toMap();
+      const QString pid = pMap.value("id").toString();
+      const QString title = pMap.value("title").toString();
+      const auto incomingTracks = playable(pMap.value("tracks").toList());
+
+      int existingIndex = -1;
+      for (int i = 0; i < m_playlists.size(); ++i) {
+        if (m_playlists[i].toMap().value("id").toString() == pid) {
+          existingIndex = i;
+          break;
+        }
+      }
+
+      if (existingIndex >= 0) {
+        auto existing = m_playlists[existingIndex].toMap();
+        existing["title"] = title;
+        existing["tracks"] = incomingTracks;
+        existing["isYouTube"] = true;
+        if (!pMap.value("art").toString().isEmpty())
+          existing["art"] = pMap.value("art");
+        m_playlists[existingIndex] = existing;
+      } else {
+        QVariantMap pl;
+        pl["id"] = pid;
+        pl["title"] = title;
+        pl["tracks"] = incomingTracks;
+        pl["isYouTube"] = true;
+        if (!pMap.value("art").toString().isEmpty())
+          pl["art"] = pMap.value("art");
+        m_playlists.append(pl);
+      }
+    }
+
+    save();
+    emit libraryChanged();
+    emit ytSyncChanged();
+    if (m_page == "library") library(m_libraryId);
+    else if (m_page == "local") { const auto id = m_libraryId; openPlaylist(id); }
+    emit toast("YouTube Music library synchronized");
+  });
 }
 void Backend::setKeepPlayedMb(int megabytes){
   megabytes=qBound(0,megabytes,65536);
@@ -1525,13 +1791,25 @@ void Backend::toggleLike(const QVariantMap &item) {
       removed = true;
       break;
     }
-  if (!removed)
-    m_favorites.prepend(item);
+  if (!removed) {
+    auto likedItem = item;
+    if (m_ytLoggedIn)
+      likedItem["fromYouTube"] = true;
+    m_favorites.prepend(likedItem);
+  }
   emit libraryChanged();
   if (m_page == "library" && m_libraryId == "favorites")
     m_results.assign(m_favorites);
   m_saveTimer.start();
   emit toast(removed ? "Removed from liked songs" : "Added to liked songs");
+
+  if (m_ytLoggedIn) {
+    const QString id = item.value("id").toString();
+    static const QRegularExpression ytVidRegex("^[A-Za-z0-9_-]{11}$");
+    if (ytVidRegex.match(id).hasMatch()) {
+      request("yt-like", {{"op", "yt-like"}, {"id", id}, {"liked", !removed}}, [](const QVariantMap &) {});
+    }
+  }
 }
 QVariantList Backend::playlists() const {
   QVariantList result;
