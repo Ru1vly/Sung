@@ -984,12 +984,19 @@ private slots:
     QVERIFY(b.isLiked("00000000010"));
 
     // Login and logout clearing data
+    QVariantMap localTrack;
+    localTrack["id"] = "local_song_test";
+    localTrack["localPath"] = "/tmp/local_song.mp3";
+    localTrack["title"] = "Local Song";
     b.loginYouTube("valid_sapisid_token");
     QTRY_VERIFY_WITH_TIMEOUT(b.ytLoggedIn(), 5000);
     QTRY_VERIFY_WITH_TIMEOUT(!b.ytSyncing(), 5000);
+    b.toggleLike(localTrack);
+    QVERIFY(b.isLiked("local_song_test"));
     b.logoutYouTube(true);
     QVERIFY(!b.ytLoggedIn());
     QVERIFY(!b.isLiked("00000000010"));
+    QVERIFY(b.isLiked("local_song_test"));
     bool stillHasPlaylist = false;
     for (const auto &p : b.playlists()) {
       if (p.toMap().value("id").toString() == "PLfixture")

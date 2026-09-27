@@ -267,4 +267,56 @@ class CatalogTests(unittest.TestCase):
                     self.assertEqual(res['name'], 'Browser User')
                     self.assertEqual(res['browser'], 'testbrowser')
 
+    def test_rebuild_auth_headers_fresh_timestamp(self):
+        import tempfile, stat, json
+        with tempfile.TemporaryDirectory() as td:
+            auth_file = pathlib.Path(td) / 'auth.json'
+            # Write auth.json with an old timestamp and custom authuser
+            stale_headers = {
+                'Cookie': 'SAPISID=sec123; SID=sid123',
+                'Authorization': 'SAPISIDHASH 1000000000_stalehash',
+                'X-Goog-AuthUser': '3',
+            }
+            auth_file.write_text(json.dumps(stale_headers))
+
+            headers = catalog.build_auth_headers(str(auth_file))
+            self.assertIsNotNone(headers)
+            self.assertEqual(headers.get('X-Goog-AuthUser'), '3')
+            self.assertTrue(headers.get('Authorization', '').startswith('SAPISIDHASH '))
+            # Verify the timestamp is freshly generated and not the stale 1000000000
+            ts_str = headers['Authorization'].split()[1].split('_')[0]
+            self.assertGreater(int(ts_str), 1700000000)
+
+    def test_credential_file_permissions(self):
+        import tempfile, stat
+        api = MagicMock()
+        api.get_account_info.return_value = {'accountName': 'Perm User'}
+        with patch.dict('sys.modules', {'ytmusicapi': MagicMock(YTMusic=MagicMock(return_value=api))}):
+            with tempfile.TemporaryDirectory() as td:
+                res = catalog.run({
+                    'op': 'yt-account',
+                    'credentials': 'SAPISID=sec123; SID=sid123',
+                    'dataPath': td
+                })
+                self.assertTrue(res['ok'])
+                auth_mode = stat.S_IMODE(pathlib.Path(res['authFile']).stat().st_mode)
+                cookie_mode = stat.S_IMODE(pathlib.Path(res['cookieFile']).stat().st_mode)
+                dp_mode = stat.S_IMODE(pathlib.Path(td).stat().st_mode)
+                self.assertEqual(auth_mode, 0o600)
+                self.assertEqual(cookie_mode, 0o600)
+                self.assertEqual(dp_mode, 0o700)
+
+    def test_get_ytmusic_require_auth_errors(self):
+        # 1. No auth when required raises ValueError
+        with self.assertRaises(ValueError) as ctx:
+            catalog.get_ytmusic({}, require_auth=True)
+        self.assertIn('Sign in to YouTube Music', str(ctx.exception))
+
+        # 2. Invalid auth raises clear session error instead of silent fallback
+        failing_ytmusic = MagicMock(side_effect=Exception('Invalid credentials'))
+        with patch.dict('sys.modules', {'ytmusicapi': MagicMock(YTMusic=failing_ytmusic)}):
+            with self.assertRaises(ValueError) as ctx:
+                catalog.get_ytmusic({'auth': 'SAPISID=sec123; SID=sid123'}, require_auth=True)
+            self.assertIn('session is invalid or expired', str(ctx.exception))
+
 if __name__=='__main__':unittest.main()

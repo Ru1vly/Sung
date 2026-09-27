@@ -1468,6 +1468,7 @@ void Backend::loginYouTubeBrowser() {
 }
 void Backend::logoutYouTube(bool clearData) {
   if (!m_ytLoggedIn && !m_settings.contains("ytLoggedIn")) return;
+  cancel("yt-sync");
   m_ytLoggedIn = false;
   m_ytAccountName.clear();
   m_ytAccountHandle.clear();
@@ -1527,6 +1528,11 @@ void Backend::syncYouTubeLibrary() {
 
   request("yt-sync", {{"op", "yt-sync"}, {"dataPath", dataPath()}}, [this](const QVariantMap &data) {
     m_ytSyncing = false;
+    if (!m_ytLoggedIn) {
+      m_ytSyncStatus.clear();
+      emit ytSyncChanged();
+      return;
+    }
     if (!data.value("ok").toBool()) {
       m_ytSyncStatus = "Sync failed";
       emit ytSyncChanged();
@@ -1791,9 +1797,12 @@ void Backend::toggleLike(const QVariantMap &item) {
       removed = true;
       break;
     }
+  static const QRegularExpression ytVidRegex("^[A-Za-z0-9_-]{11}$");
+  const QString id = itemId(item);
+  const bool isYouTubeTrack = ytVidRegex.match(id).hasMatch();
   if (!removed) {
     auto likedItem = item;
-    if (m_ytLoggedIn)
+    if (m_ytLoggedIn && isYouTubeTrack)
       likedItem["fromYouTube"] = true;
     m_favorites.prepend(likedItem);
   }
@@ -1803,12 +1812,13 @@ void Backend::toggleLike(const QVariantMap &item) {
   m_saveTimer.start();
   emit toast(removed ? "Removed from liked songs" : "Added to liked songs");
 
-  if (m_ytLoggedIn) {
-    const QString id = item.value("id").toString();
-    static const QRegularExpression ytVidRegex("^[A-Za-z0-9_-]{11}$");
-    if (ytVidRegex.match(id).hasMatch()) {
-      request("yt-like", {{"op", "yt-like"}, {"id", id}, {"liked", !removed}}, [](const QVariantMap &) {});
-    }
+  if (m_ytLoggedIn && isYouTubeTrack) {
+    const QString likeChannel = "yt-like-" + id;
+    request(likeChannel, {{"op", "yt-like"}, {"id", id}, {"liked", !removed}}, [this](const QVariantMap &data) {
+      if (!data.value("ok", true).toBool()) {
+        emit toast("Could not update like on YouTube Music");
+      }
+    });
   }
 }
 QVariantList Backend::playlists() const {

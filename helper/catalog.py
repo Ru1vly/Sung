@@ -396,7 +396,7 @@ def parse_credentials(raw):
                         if '=' in part:
                             k, v = part.strip().split('=', 1)
                             cookie_map[k.strip()] = v.strip()
-                auth_user = str(parsed.get('authUser') or parsed.get('x-goog-authuser') or '0')
+                auth_user = str(parsed.get('authUser') or parsed.get('X-Goog-AuthUser') or parsed.get('x-goog-authuser') or '0')
         except Exception:
             pass
     else:
@@ -423,15 +423,9 @@ def build_auth_headers(auth_input):
         else:
             raw = auth_input
     elif isinstance(auth_input, dict):
-        return auth_input
+        raw = json.dumps(auth_input)
     if not raw:
         return None
-
-    if raw.startswith('{') and '\"Authorization\"' in raw and '\"Cookie\"' in raw:
-        try:
-            return json.loads(raw)
-        except Exception:
-            pass
 
     cookie_map, sapisid, auth_user, visitor_data, data_sync_id = parse_credentials(raw)
     if not sapisid:
@@ -460,7 +454,7 @@ def build_auth_headers(auth_input):
     return headers
 
 
-def get_ytmusic(req, timeout=20):
+def get_ytmusic(req, timeout=20, require_auth=False):
     from ytmusicapi import YTMusic
     auth_input = req.get('auth') or req.get('cookies')
     auth_headers = None
@@ -471,9 +465,14 @@ def get_ytmusic(req, timeout=20):
         auth_file = Path(req['dataPath']) / 'auth.json'
         if auth_file.is_file():
             auth_headers = build_auth_headers(str(auth_file))
-    try:
-        api = YTMusic(auth=auth_headers, requests_session=True) if auth_headers else YTMusic(requests_session=True)
-    except Exception:
+    if require_auth and not auth_headers:
+        raise ValueError('Sign in to YouTube Music to sync your library.')
+    if auth_headers:
+        try:
+            api = YTMusic(auth=auth_headers, requests_session=True)
+        except Exception as exc:
+            raise ValueError('YouTube Music session is invalid or expired. Please sign in again.') from exc
+    else:
         api = YTMusic(requests_session=True)
     api._session.request = _timeout_request(api._session.request, timeout)
     return api
@@ -566,16 +565,35 @@ def run(req):
         cookie_file_path = ''
         auth_file_path = ''
         if data_path:
+            import os
             dp = Path(data_path)
             dp.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(dp, 0o700)
+            except OSError:
+                pass
             auth_file = dp / 'auth.json'
-            auth_file.write_text(json.dumps(headers, indent=2), encoding='utf-8')
+            auth_bytes = json.dumps(headers, indent=2).encode('utf-8')
+            fd = os.open(str(auth_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with open(fd, 'wb') as f:
+                f.write(auth_bytes)
+            try:
+                os.chmod(auth_file, 0o600)
+            except OSError:
+                pass
             auth_file_path = str(auth_file)
             netscape_lines = ["# Netscape HTTP Cookie File\n"]
             for k, v in cookie_map.items():
                 netscape_lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{k}\t{v}\n")
             cookie_file = dp / 'cookies.txt'
-            cookie_file.write_text("".join(netscape_lines), encoding='utf-8')
+            cookie_bytes = "".join(netscape_lines).encode('utf-8')
+            fd = os.open(str(cookie_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with open(fd, 'wb') as f:
+                f.write(cookie_bytes)
+            try:
+                os.chmod(cookie_file, 0o600)
+            except OSError:
+                pass
             cookie_file_path = str(cookie_file)
         from ytmusicapi import YTMusic
         api = YTMusic(auth=headers, requests_session=True)
@@ -603,7 +621,7 @@ def run(req):
             'authFile': auth_file_path,
         }
     if op == 'yt-sync':
-        api = get_ytmusic(req, timeout=40)
+        api = get_ytmusic(req, timeout=40, require_auth=True)
         liked_data = api.get_liked_songs(limit=min(int(req.get('limit', 2000)), 5000))
         liked_tracks = clean(liked_data.get('tracks', []), 'song', liked_data)
         remote_playlists = api.get_library_playlists(limit=100)
@@ -628,7 +646,7 @@ def run(req):
                 continue
         return {'ok': True, 'liked': liked_tracks, 'playlists': playlists}
     if op == 'yt-like':
-        api = get_ytmusic(req, timeout=15)
+        api = get_ytmusic(req, timeout=15, require_auth=True)
         vid = req.get('id')
         if not vid or not re.fullmatch(r'[A-Za-z0-9_-]{11}', vid):
             raise ValueError('Invalid video ID')
