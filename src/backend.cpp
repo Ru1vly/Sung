@@ -1420,10 +1420,29 @@ void Backend::loginYouTube(const QString &credentials) {
     m_settings.setValue("ytAccountPhoto", m_ytAccountPhoto);
     if (!m_stagedCookiePath.isEmpty()) {
       auto path = dataPath() + "/cookies.txt";
-      QFile::remove(path);
-      if (QFile::rename(m_stagedCookiePath, path)) {
-        QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+      const auto stagedPath = m_stagedCookiePath;
+      QFile staged(stagedPath);
+      if (!staged.open(QIODevice::ReadOnly)) {
+        notifyError("Could not install cookies.");
+        return;
       }
+      const auto bytes = staged.readAll();
+      if (staged.error() != QFileDevice::NoError) {
+        notifyError("Could not install cookies.");
+        return;
+      }
+      QSaveFile installed(path);
+      if (!installed.open(QIODevice::WriteOnly) ||
+          installed.write(bytes) != bytes.size()) {
+        notifyError("Could not install cookies.");
+        return;
+      }
+      installed.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+      if (!installed.commit()) {
+        notifyError("Could not install cookies.");
+        return;
+      }
+      QFile::remove(stagedPath);
       m_stagedCookiePath.clear();
       cancelPreparation(); m_streams.clear();
       m_settings.setValue("cookies", path);

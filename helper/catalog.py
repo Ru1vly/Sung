@@ -648,7 +648,11 @@ def run(req):
                             remote_count = int(remote_count)
                     except (ValueError, TypeError):
                         remote_count = None
-                is_complete = (raw_count >= remote_count) if remote_count is not None else True
+                limit = min(int(req.get('playlistLimit', 1000)), 5000)
+                if remote_count is not None:
+                    is_complete = raw_count >= remote_count
+                else:
+                    is_complete = raw_count < limit
                 p_tracks = clean(raw_tracks, 'song', p_data)
                 playlists.append({
                     'id': pid,

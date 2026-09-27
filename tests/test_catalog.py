@@ -349,6 +349,8 @@ class CatalogTests(unittest.TestCase):
             {'playlistId': 'PLpartial', 'title': 'Partial Playlist'},
             {'playlistId': 'PLfull', 'title': 'Full Playlist'},
             {'playlistId': 'PLempty', 'title': 'Empty Playlist'},
+            {'playlistId': 'PLunknown_full', 'title': 'Unknown Full Playlist'},
+            {'playlistId': 'PLunknown_hit_limit', 'title': 'Unknown Hit Limit Playlist'},
         ]
         def mock_get_playlist(pid, **kwargs):
             if pid == 'PLpartial':
@@ -369,6 +371,16 @@ class CatalogTests(unittest.TestCase):
                     'trackCount': 0,
                     'tracks': []
                 }
+            elif pid == 'PLunknown_full':
+                return {
+                    'title': 'Unknown Full Playlist',
+                    'tracks': [{'videoId': 'vid1', 'title': 'Song 1'}, {'videoId': 'vid2', 'title': 'Song 2'}]
+                }
+            elif pid == 'PLunknown_hit_limit':
+                return {
+                    'title': 'Unknown Hit Limit Playlist',
+                    'tracks': [{'videoId': f'vid{i}', 'title': f'Song {i}'} for i in range(5)]
+                }
             return {'title': 'Unknown', 'tracks': []}
 
         api.get_playlist.side_effect = mock_get_playlist
@@ -380,12 +392,15 @@ class CatalogTests(unittest.TestCase):
                 res = catalog.run({
                     'op': 'yt-sync',
                     'auth': str(auth_file),
-                    'dataPath': td
+                    'dataPath': td,
+                    'playlistLimit': 5,
                 })
                 self.assertTrue(res['ok'])
                 pls = {p['id']: p for p in res['playlists']}
                 self.assertFalse(pls['PLpartial']['complete'])
                 self.assertTrue(pls['PLfull']['complete'])
                 self.assertTrue(pls['PLempty']['complete'])
+                self.assertTrue(pls['PLunknown_full']['complete'])
+                self.assertFalse(pls['PLunknown_hit_limit']['complete'])
 
 if __name__=='__main__':unittest.main()
