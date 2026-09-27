@@ -562,6 +562,23 @@ def run(req):
         if not headers:
             raise ValueError('No active YouTube login session (SAPISID) found in the provided cookies or token.')
         cookie_map, sapisid, auth_user, visitor_data, data_sync_id = parse_credentials(credentials if isinstance(credentials, str) else '')
+        from ytmusicapi import YTMusic
+        api = YTMusic(auth=headers, requests_session=True)
+        api._session.request = _timeout_request(api._session.request, 20)
+        account_name = 'YouTube Music User'
+        channel_handle = ''
+        photo_url = ''
+        try:
+            info = api.get_account_info()
+            account_name = info.get('accountName') or account_name
+            channel_handle = info.get('channelHandle') or ''
+            photo_url = info.get('accountPhotoUrl') or ''
+        except Exception:
+            # If account menu parsing fails, probe library to check if session is authenticated
+            try:
+                api.get_library_playlists(limit=1)
+            except Exception:
+                raise ValueError('YouTube Music session is invalid or expired. Please sign in again.')
         cookie_file_path = ''
         auth_file_path = ''
         if data_path:
@@ -595,23 +612,6 @@ def run(req):
             except OSError:
                 pass
             cookie_file_path = str(cookie_file)
-        from ytmusicapi import YTMusic
-        api = YTMusic(auth=headers, requests_session=True)
-        api._session.request = _timeout_request(api._session.request, 20)
-        account_name = 'YouTube Music User'
-        channel_handle = ''
-        photo_url = ''
-        try:
-            info = api.get_account_info()
-            account_name = info.get('accountName') or account_name
-            channel_handle = info.get('channelHandle') or ''
-            photo_url = info.get('accountPhotoUrl') or ''
-        except Exception:
-            # If account menu parsing fails, probe library to check if session is authenticated
-            try:
-                api.get_library_playlists(limit=1)
-            except Exception:
-                raise ValueError('YouTube Music session is invalid or expired. Please sign in again.')
         return {
             'ok': True,
             'name': account_name,
@@ -632,7 +632,24 @@ def run(req):
                 continue
             try:
                 p_data = api.get_playlist(pid, limit=min(int(req.get('playlistLimit', 1000)), 5000))
-                p_tracks = clean(p_data.get('tracks', []), 'song', p_data)
+                raw_tracks = p_data.get('tracks') or []
+                raw_count = len(raw_tracks)
+                remote_count = p_data.get('trackCount')
+                if remote_count is None and 'count' in p_data:
+                    remote_count = p_data.get('count')
+                if remote_count is None and 'count' in p:
+                    remote_count = p.get('count')
+                if remote_count is not None:
+                    try:
+                        if isinstance(remote_count, str):
+                            digits = re.search(r'\d+', remote_count)
+                            remote_count = int(digits.group(0)) if digits else None
+                        else:
+                            remote_count = int(remote_count)
+                    except (ValueError, TypeError):
+                        remote_count = None
+                is_complete = (raw_count >= remote_count) if remote_count is not None else True
+                p_tracks = clean(raw_tracks, 'song', p_data)
                 playlists.append({
                     'id': pid,
                     'browseId': pid,
@@ -640,6 +657,7 @@ def run(req):
                     'art': artwork(p_data) or artwork(p),
                     'tracks': p_tracks,
                     'count': len(p_tracks),
+                    'complete': is_complete,
                     'isYouTube': True,
                 })
             except Exception:

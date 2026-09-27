@@ -1313,6 +1313,32 @@ void Backend::setCookieFile(const QUrl &url) {
     return;
   }
   QDir().mkpath(dataPath());
+
+  const QString content = QString::fromUtf8(bytes);
+  const bool hasAccount = content.contains("SAPISID") ||
+                          content.contains("__Secure-3PAPISID") ||
+                          content.contains("__Secure-1PAPISID");
+
+  if (hasAccount) {
+    if (!m_stagedCookiePath.isEmpty() && QFile::exists(m_stagedCookiePath))
+      QFile::remove(m_stagedCookiePath);
+    auto stagedPath = dataPath() + "/cookies.staged.txt";
+    QSaveFile out(stagedPath);
+    if (!out.open(QIODevice::WriteOnly)) {
+      notifyError("Cannot save the cookie file.");
+      return;
+    }
+    out.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    out.write(bytes);
+    if (!out.commit()) {
+      notifyError("Could not save cookies.");
+      return;
+    }
+    m_stagedCookiePath = stagedPath;
+    loginYouTube(content);
+    return;
+  }
+
   auto path = dataPath() + "/cookies.txt";
   QSaveFile out(path);
   if (!out.open(QIODevice::WriteOnly)) {
@@ -1329,13 +1355,12 @@ void Backend::setCookieFile(const QUrl &url) {
   m_settings.setValue("cookies", path);
   emit settingsChanged();
   emit toast("Cookies imported");
-
-  const QString content = QString::fromUtf8(bytes);
-  if (content.contains("SAPISID") || content.contains("__Secure-3PAPISID") || content.contains("__Secure-1PAPISID")) {
-    loginYouTube(content);
-  }
 }
 void Backend::clearCookies() {
+  if (!m_stagedCookiePath.isEmpty()) {
+    QFile::remove(m_stagedCookiePath);
+    m_stagedCookiePath.clear();
+  }
   const auto p = cookies();
   if (p == dataPath() + "/cookies.txt")
     QFile::remove(p);
@@ -1362,6 +1387,10 @@ void Backend::setYtSyncOnStartup(bool enabled) {
 void Backend::loginYouTube(const QString &credentials) {
   const auto creds = credentials.trimmed();
   if (creds.isEmpty()) {
+    if (!m_stagedCookiePath.isEmpty()) {
+      QFile::remove(m_stagedCookiePath);
+      m_stagedCookiePath.clear();
+    }
     notifyError("Please provide YouTube Music cookies or login token.");
     return;
   }
@@ -1373,6 +1402,10 @@ void Backend::loginYouTube(const QString &credentials) {
     m_ytSyncing = false;
     m_ytSyncStatus.clear();
     if (!data.value("ok").toBool()) {
+      if (!m_stagedCookiePath.isEmpty()) {
+        QFile::remove(m_stagedCookiePath);
+        m_stagedCookiePath.clear();
+      }
       emit ytSyncChanged();
       notifyError(data.value("error", "Failed to sign in to YouTube Music.").toString());
       return;
@@ -1385,12 +1418,25 @@ void Backend::loginYouTube(const QString &credentials) {
     m_settings.setValue("ytAccountName", m_ytAccountName);
     m_settings.setValue("ytAccountHandle", m_ytAccountHandle);
     m_settings.setValue("ytAccountPhoto", m_ytAccountPhoto);
-    QString cookieFile = data.value("cookieFile").toString();
-    if (cookieFile.isEmpty())
-      cookieFile = dataPath() + "/cookies.txt";
-    if (QFile::exists(cookieFile)) {
-      m_settings.setValue("cookies", cookieFile);
+    if (!m_stagedCookiePath.isEmpty()) {
+      auto path = dataPath() + "/cookies.txt";
+      QFile::remove(path);
+      if (QFile::rename(m_stagedCookiePath, path)) {
+        QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+      }
+      m_stagedCookiePath.clear();
+      cancelPreparation(); m_streams.clear();
+      m_settings.setValue("cookies", path);
       emit settingsChanged();
+      emit toast("Cookies imported");
+    } else {
+      QString cookieFile = data.value("cookieFile").toString();
+      if (cookieFile.isEmpty())
+        cookieFile = dataPath() + "/cookies.txt";
+      if (QFile::exists(cookieFile)) {
+        m_settings.setValue("cookies", cookieFile);
+        emit settingsChanged();
+      }
     }
     emit ytAccountChanged();
     emit ytSyncChanged();
@@ -1469,6 +1515,10 @@ void Backend::loginYouTubeBrowser() {
 void Backend::logoutYouTube(bool clearData) {
   if (!m_ytLoggedIn && !m_settings.contains("ytLoggedIn")) return;
   cancel("yt-sync");
+  if (!m_stagedCookiePath.isEmpty()) {
+    QFile::remove(m_stagedCookiePath);
+    m_stagedCookiePath.clear();
+  }
   m_ytLoggedIn = false;
   m_ytAccountName.clear();
   m_ytAccountHandle.clear();
@@ -1563,6 +1613,7 @@ void Backend::syncYouTubeLibrary() {
       const QString pid = pMap.value("id").toString();
       const QString title = pMap.value("title").toString();
       const auto incomingTracks = playable(pMap.value("tracks").toList());
+      const bool complete = pMap.value("complete", false).toBool();
 
       int existingIndex = -1;
       for (int i = 0; i < m_playlists.size(); ++i) {
@@ -1575,7 +1626,8 @@ void Backend::syncYouTubeLibrary() {
       if (existingIndex >= 0) {
         auto existing = m_playlists[existingIndex].toMap();
         existing["title"] = title;
-        existing["tracks"] = incomingTracks;
+        if (complete)
+          existing["tracks"] = incomingTracks;
         existing["isYouTube"] = true;
         if (!pMap.value("art").toString().isEmpty())
           existing["art"] = pMap.value("art");

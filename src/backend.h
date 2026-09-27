@@ -849,6 +849,7 @@ private:
   bool m_ytSyncing = false;
   QString m_ytSyncStatus;
   qint64 m_ytLastSyncEpoch = 0;
+  QString m_stagedCookiePath;
   quint64 m_trackToken = 0;
   int m_recoveryAttempts = 0;
   bool m_recovering = false;

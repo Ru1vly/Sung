@@ -317,6 +317,75 @@ class CatalogTests(unittest.TestCase):
         with patch.dict('sys.modules', {'ytmusicapi': MagicMock(YTMusic=failing_ytmusic)}):
             with self.assertRaises(ValueError) as ctx:
                 catalog.get_ytmusic({'auth': 'SAPISID=sec123; SID=sid123'}, require_auth=True)
-            self.assertIn('session is invalid or expired', str(ctx.exception))
+    def test_yt_account_validation_failure_preserves_existing_credentials(self):
+        import tempfile
+        api = MagicMock()
+        api.get_account_info.side_effect = Exception('Session expired')
+        api.get_library_playlists.side_effect = Exception('Session expired')
+        with patch.dict('sys.modules', {'ytmusicapi': MagicMock(YTMusic=MagicMock(return_value=api))}):
+            with tempfile.TemporaryDirectory() as td:
+                dp = pathlib.Path(td)
+                auth_file = dp / 'auth.json'
+                cookie_file = dp / 'cookies.txt'
+                auth_file.write_text('{"original": "auth"}')
+                cookie_file.write_text('original_cookies')
+
+                with self.assertRaises(ValueError) as ctx:
+                    catalog.run({
+                        'op': 'yt-account',
+                        'credentials': 'SAPISID=sec123; SID=sid123',
+                        'dataPath': td
+                    })
+                self.assertIn('invalid or expired', str(ctx.exception))
+                # Verify existing files were NOT overwritten
+                self.assertEqual(auth_file.read_text(), '{"original": "auth"}')
+                self.assertEqual(cookie_file.read_text(), 'original_cookies')
+
+    def test_yt_sync_completeness_flag(self):
+        import tempfile
+        api = MagicMock()
+        api.get_liked_songs.return_value = {'tracks': []}
+        api.get_library_playlists.return_value = [
+            {'playlistId': 'PLpartial', 'title': 'Partial Playlist'},
+            {'playlistId': 'PLfull', 'title': 'Full Playlist'},
+            {'playlistId': 'PLempty', 'title': 'Empty Playlist'},
+        ]
+        def mock_get_playlist(pid, **kwargs):
+            if pid == 'PLpartial':
+                return {
+                    'title': 'Partial Playlist',
+                    'trackCount': 10,
+                    'tracks': [{'videoId': 'vid1', 'title': 'Song 1'}]
+                }
+            elif pid == 'PLfull':
+                return {
+                    'title': 'Full Playlist',
+                    'trackCount': 2,
+                    'tracks': [{'videoId': 'vid1', 'title': 'Song 1'}, {'videoId': 'vid2', 'title': 'Song 2'}]
+                }
+            elif pid == 'PLempty':
+                return {
+                    'title': 'Empty Playlist',
+                    'trackCount': 0,
+                    'tracks': []
+                }
+            return {'title': 'Unknown', 'tracks': []}
+
+        api.get_playlist.side_effect = mock_get_playlist
+
+        with patch.dict('sys.modules', {'ytmusicapi': MagicMock(YTMusic=MagicMock(return_value=api))}):
+            with tempfile.TemporaryDirectory() as td:
+                auth_file = pathlib.Path(td) / 'auth.json'
+                auth_file.write_text('{"Cookie": "SAPISID=sapisid"}')
+                res = catalog.run({
+                    'op': 'yt-sync',
+                    'auth': str(auth_file),
+                    'dataPath': td
+                })
+                self.assertTrue(res['ok'])
+                pls = {p['id']: p for p in res['playlists']}
+                self.assertFalse(pls['PLpartial']['complete'])
+                self.assertTrue(pls['PLfull']['complete'])
+                self.assertTrue(pls['PLempty']['complete'])
 
 if __name__=='__main__':unittest.main()
